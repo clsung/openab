@@ -16,7 +16,7 @@ use serenity::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Reusable HTTP client for downloading Discord attachments.
 /// Built once with a 30s timeout and rustls TLS (no native-tls deps).
@@ -127,8 +127,11 @@ impl EventHandler for Handler {
             text: prompt_with_sender.clone(),
         });
 
-        // Process attachments: route by content type (audio → STT, image → encode)
+        // Process attachments: route by content type (audio → STT, text file → inline, image → encode)
         if !msg.attachments.is_empty() {
+            let mut text_file_bytes: u64 = 0;
+            const TEXT_TOTAL_CAP: u64 = 1024 * 1024; // 1 MB total for all text file attachments
+
             for attachment in &msg.attachments {
                 if is_audio_attachment(attachment) {
                     if self.stt_config.enabled {
@@ -142,7 +145,12 @@ impl EventHandler for Handler {
                         debug!(filename = %attachment.filename, "skipping audio attachment (STT disabled)");
                     }
                 } else if is_text_attachment(attachment) {
+                    if text_file_bytes + u64::from(attachment.size) > TEXT_TOTAL_CAP {
+                        warn!(filename = %attachment.filename, total = text_file_bytes, "text attachments total exceeds 1MB cap, skipping remaining");
+                        continue;
+                    }
                     if let Some(content_block) = download_and_read_text_file(attachment).await {
+                        text_file_bytes += u64::from(attachment.size);
                         debug!(filename = %attachment.filename, "adding text file attachment");
                         content_blocks.push(content_block);
                     }
@@ -251,20 +259,44 @@ const TEXT_EXTENSIONS: &[&str] = &[
     "txt", "csv", "log", "md", "json", "jsonl", "yaml", "yml", "toml", "xml",
     "rs", "py", "js", "ts", "jsx", "tsx", "go", "java", "c", "cpp", "h", "hpp",
     "rb", "sh", "bash", "zsh", "fish", "ps1", "bat", "sql", "html", "css",
-    "scss", "less", "ini", "cfg", "conf", "env", "dockerfile", "makefile",
+    "scss", "less", "ini", "cfg", "conf", "env",
+];
+
+/// Exact filenames (no extension) recognised as text files.
+const TEXT_FILENAMES: &[&str] = &[
+    "dockerfile", "makefile", "justfile", "rakefile", "gemfile",
+    "procfile", "vagrantfile", ".gitignore", ".dockerignore", ".editorconfig",
+];
+
+/// MIME types recognised as text-based (beyond `text/*`).
+const TEXT_MIME_TYPES: &[&str] = &[
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/typescript",
+    "application/x-yaml",
+    "application/x-sh",
+    "application/toml",
+    "application/x-toml",
 ];
 
 /// Check if an attachment is a text-based file we can inline.
 fn is_text_attachment(attachment: &serenity::model::channel::Attachment) -> bool {
     let mime = attachment.content_type.as_deref().unwrap_or("");
-    if mime.starts_with("text/") || mime == "application/json" || mime == "application/xml" {
+    let mime_base = mime.split(';').next().unwrap_or(mime).trim();
+    if mime_base.starts_with("text/") || TEXT_MIME_TYPES.contains(&mime_base) {
         return true;
     }
-    attachment
-        .filename
-        .rsplit('.')
-        .next()
-        .is_some_and(|ext| TEXT_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
+    // Check extension
+    if attachment.filename.contains('.') {
+        if let Some(ext) = attachment.filename.rsplit('.').next() {
+            if TEXT_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+                return true;
+            }
+        }
+    }
+    // Check exact filename (Dockerfile, Makefile, etc.)
+    TEXT_FILENAMES.contains(&attachment.filename.to_lowercase().as_str())
 }
 
 /// Download a text-based file attachment and return it as a ContentBlock::Text.
@@ -275,24 +307,33 @@ async fn download_and_read_text_file(
     const MAX_SIZE: u64 = 512 * 1024; // 512 KB
 
     if u64::from(attachment.size) > MAX_SIZE {
-        error!(filename = %attachment.filename, size = attachment.size, "text file exceeds 512KB limit");
+        warn!(filename = %attachment.filename, size = attachment.size, "text file exceeds 512KB limit, skipping");
         return None;
     }
 
     let resp = HTTP_CLIENT.get(&attachment.url).send().await.ok()?;
     if !resp.status().is_success() {
-        error!(url = %attachment.url, status = %resp.status(), "text file download failed");
+        warn!(url = %attachment.url, status = %resp.status(), "text file download failed");
         return None;
     }
     let bytes = resp.bytes().await.ok()?;
+
+    // Defense-in-depth: verify actual download size
+    if bytes.len() as u64 > MAX_SIZE {
+        warn!(filename = %attachment.filename, size = bytes.len(), "downloaded text file exceeds 512KB limit, skipping");
+        return None;
+    }
 
     let text = String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| {
         String::from_utf8_lossy(&bytes).into_owned()
     });
 
+    // Use enough backticks to avoid conflicts with content that contains triple backticks
+    let fence = if text.contains("```") { "````" } else { "```" };
+
     debug!(filename = %attachment.filename, chars = text.len(), "text file inlined");
     Some(ContentBlock::Text {
-        text: format!("[File: {}]\n```\n{}\n```", attachment.filename, text),
+        text: format!("[File: {}]\n{fence}\n{}\n{fence}", attachment.filename, text),
     })
 }
 
