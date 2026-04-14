@@ -1,7 +1,10 @@
-//! Interactive setup wizard for OpenAB.
+//! Interactive setup wizard TUI and Discord API client.
 
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
+
+use crate::setup::config::{generate_config, mask_bot_token};
+use crate::setup::validate::{validate_bot_token, validate_channel_id};
 
 // ---------------------------------------------------------------------------
 // Color codes (ANSI)
@@ -10,7 +13,6 @@ use std::path::PathBuf;
 const C: Colors = Colors {
     reset: "\x1b[0m",
     bold: "\x1b[1m",
-    dim: "\x1b[2m",
     cyan: "\x1b[36m",
     green: "\x1b[32m",
     red: "\x1b[31m",
@@ -21,13 +23,14 @@ const C: Colors = Colors {
 struct Colors {
     reset: &'static str,
     bold: &'static str,
-    dim: &'static str,
     cyan: &'static str,
     green: &'static str,
     red: &'static str,
     yellow: &'static str,
     magenta: &'static str,
 }
+
+const BORDER: char = '═';
 
 macro_rules! cprintln {
     ($color:expr, $fmt:expr) => {{
@@ -43,7 +46,7 @@ macro_rules! cprintln {
 // ---------------------------------------------------------------------------
 
 fn is_interactive() -> bool {
-    atty::is(atty::Stream::Stdout) && atty::is(atty::Stream::Stdin)
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 fn prompt(prompt_text: &str) -> String {
@@ -68,7 +71,7 @@ fn prompt_default(prompt_text: &str, default: &str) -> String {
 }
 
 fn prompt_password(prompt_text: &str) -> String {
-    print!("{}{}: ", C.yellow, prompt_text,);
+    print!("{}{}: ", C.yellow, prompt_text);
     io::stdout().flush().ok();
     rpassword::read_password().unwrap_or_default()
 }
@@ -149,9 +152,9 @@ fn print_box(lines: &[&str]) {
         .map(|l| unicode_width::UnicodeWidthStr::width(&**l))
         .max()
         .unwrap_or(60);
-    let width = width.max(60).min(76);
+    let width = width.clamp(60, 76);
     println!();
-    cprintln!(C.cyan, "{}", "╔".to_string() + &"═".repeat(width + 2) + "╗");
+    cprintln!(C.cyan, "{}", "╔".to_string() + &BORDER.to_string().repeat(width + 2) + "╗");
     for line in lines {
         let padded = format!(" {:<width$} ", format!("{}", line), width = width);
         print!("{}", C.cyan);
@@ -160,72 +163,39 @@ fn print_box(lines: &[&str]) {
         print!("{}", C.cyan);
         println!("║");
     }
-    cprintln!(C.cyan, "{}", "╚".to_string() + &"═".repeat(width + 2) + "╝");
+    cprintln!(C.cyan, "{}", "╚".to_string() + &BORDER.to_string().repeat(width + 2) + "╝");
     println!();
 }
 
 // ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-/// Validate bot token format using allowlist (a-zA-Z0-9-./_)
-pub fn validate_bot_token(token: &str) -> anyhow::Result<()> {
-    if token.is_empty() {
-        anyhow::bail!("Token cannot be empty");
-    }
-    if !token
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_' || c == '/')
-    {
-        anyhow::bail!(
-            "Token must only contain ASCII letters, numbers, dash, period, underscore, or slash"
-        );
-    }
-    Ok(())
-}
-
-/// Validate agent command
-pub fn validate_agent_command(cmd: &str) -> anyhow::Result<()> {
-    let valid = ["kiro", "claude", "codex", "gemini"];
-    if !valid.contains(&cmd) {
-        anyhow::bail!("Agent must be one of: {}", valid.join(", "));
-    }
-    Ok(())
-}
-
-/// Validate channel ID is numeric
-pub fn validate_channel_id(id: &str) -> anyhow::Result<()> {
-    if id.is_empty() {
-        anyhow::bail!("Channel ID cannot be empty");
-    }
-    if !id.chars().all(|c| c.is_ascii_digit()) {
-        anyhow::bail!("Channel ID must be numeric only");
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Discord API client
+// Discord API client (uses reqwest — no ureq dependency)
 // ---------------------------------------------------------------------------
 
 struct DiscordClient {
     token: String,
+    http: reqwest::blocking::Client,
 }
 
 impl DiscordClient {
     fn new(token: &str) -> Self {
         Self {
             token: token.to_string(),
+            http: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("static HTTP client must build"),
         }
     }
 
     /// Verify token by fetching bot info
     fn verify_token(&self) -> anyhow::Result<(String, String)> {
-        let resp = ureq::get("https://discord.com/api/v10/users/@me")
-            .set("Authorization", format!("Bot {}", self.token).as_str())
-            .set("User-Agent", "OpenAB setup wizard")
-            .call()?;
-        if !(200..300).contains(&resp.status()) {
+        let resp = self
+            .http
+            .get("https://discord.com/api/v10/users/@me")
+            .header("Authorization", format!("Bot {}", self.token))
+            .header("User-Agent", "OpenAB setup wizard")
+            .send()?;
+        if !resp.status().is_success() {
             anyhow::bail!("Token verification failed: HTTP {}", resp.status());
         }
         #[derive(serde::Deserialize)]
@@ -233,17 +203,19 @@ impl DiscordClient {
             id: String,
             username: String,
         }
-        let me: MeResponse = serde_json::from_value(resp.into_json()?)?;
+        let me: MeResponse = resp.json()?;
         Ok((me.id, me.username))
     }
 
     /// Fetch guilds the bot is in
     fn fetch_guilds(&self) -> anyhow::Result<Vec<(String, String)>> {
-        let resp = ureq::get("https://discord.com/api/v10/users/@me/guilds")
-            .set("Authorization", format!("Bot {}", self.token).as_str())
-            .set("User-Agent", "OpenAB setup wizard")
-            .call()?;
-        if !(200..300).contains(&resp.status()) {
+        let resp = self
+            .http
+            .get("https://discord.com/api/v10/users/@me/guilds")
+            .header("Authorization", format!("Bot {}", self.token))
+            .header("User-Agent", "OpenAB setup wizard")
+            .send()?;
+        if !resp.status().is_success() {
             anyhow::bail!("Failed to fetch guilds: HTTP {}", resp.status());
         }
         #[derive(serde::Deserialize)]
@@ -251,18 +223,20 @@ impl DiscordClient {
             id: String,
             name: String,
         }
-        let guilds: Vec<Guild> = serde_json::from_value(resp.into_json()?)?;
+        let guilds: Vec<Guild> = resp.json()?;
         Ok(guilds.into_iter().map(|g| (g.id, g.name)).collect())
     }
 
     /// Fetch channels in a guild
     fn fetch_channels(&self, guild_id: &str) -> anyhow::Result<Vec<(String, String, String)>> {
         let url = format!("https://discord.com/api/v10/guilds/{}/channels", guild_id);
-        let resp = ureq::Agent::new().get(&url)
-            .set("Authorization", format!("Bot {}", self.token).as_str())
-            .set("User-Agent", "OpenAB setup wizard")
-            .call()?;
-        if !(200..300).contains(&resp.status()) {
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .header("User-Agent", "OpenAB setup wizard")
+            .send()?;
+        if !resp.status().is_success() {
             anyhow::bail!("Failed to fetch channels: HTTP {}", resp.status());
         }
         #[derive(serde::Deserialize)]
@@ -272,7 +246,7 @@ impl DiscordClient {
             kind: u8,
             name: String,
         }
-        let channels: Vec<Channel> = serde_json::from_value(resp.into_json()?)?;
+        let channels: Vec<Channel> = resp.json()?;
         // type 0 = text channel
         Ok(channels
             .into_iter()
@@ -280,116 +254,6 @@ impl DiscordClient {
             .map(|c| (c.id, c.name, guild_id.to_string()))
             .collect())
     }
-}
-
-// ---------------------------------------------------------------------------
-// Config generation (typed, no string replacement)
-// ---------------------------------------------------------------------------
-
-#[derive(serde::Serialize)]
-struct ConfigToml {
-    discord: DiscordConfigToml,
-    agent: AgentConfigToml,
-    pool: PoolConfigToml,
-    reactions: ReactionsConfigToml,
-}
-
-#[derive(serde::Serialize)]
-struct DiscordConfigToml {
-    bot_token: String,
-    allowed_channels: Vec<String>,
-}
-
-#[derive(serde::Serialize)]
-struct AgentConfigToml {
-    command: String,
-    args: Vec<String>,
-    working_dir: String,
-}
-
-#[derive(serde::Serialize)]
-struct PoolConfigToml {
-    max_sessions: usize,
-    session_ttl_hours: u64,
-}
-
-#[derive(serde::Serialize)]
-struct ReactionsConfigToml {
-    enabled: bool,
-    remove_after_reply: bool,
-    emojis: EmojisToml,
-    timing: TimingToml,
-}
-
-#[derive(serde::Serialize)]
-struct EmojisToml {
-    queued: String,
-    thinking: String,
-    tool: String,
-    coding: String,
-    web: String,
-    done: String,
-    error: String,
-}
-
-#[derive(serde::Serialize)]
-struct TimingToml {
-    debounce_ms: u64,
-    stall_soft_ms: u64,
-    stall_hard_ms: u64,
-    done_hold_ms: u64,
-    error_hold_ms: u64,
-}
-
-fn generate_config(
-    bot_token: &str,
-    agent_command: &str,
-    channel_ids: Vec<String>,
-    working_dir: &str,
-    max_sessions: usize,
-    session_ttl_hours: u64,
-    reactions_enabled: bool,
-    emojis: &EmojisToml,
-) -> String {
-    let config = ConfigToml {
-        discord: DiscordConfigToml {
-            bot_token: bot_token.to_string(),
-            allowed_channels: channel_ids,
-        },
-        agent: AgentConfigToml {
-            command: agent_command.to_string(),
-            args: match agent_command {
-                "kiro" => vec!["acp".to_string(), "--trust-all-tools".to_string()],
-                _ => vec![],
-            },
-            working_dir: working_dir.to_string(),
-        },
-        pool: PoolConfigToml {
-            max_sessions,
-            session_ttl_hours,
-        },
-        reactions: ReactionsConfigToml {
-            enabled: reactions_enabled,
-            remove_after_reply: false,
-            emojis: EmojisToml {
-                queued: emojis.queued.clone(),
-                thinking: emojis.thinking.clone(),
-                tool: emojis.tool.clone(),
-                coding: emojis.coding.clone(),
-                web: emojis.web.clone(),
-                done: emojis.done.clone(),
-                error: emojis.error.clone(),
-            },
-            timing: TimingToml {
-                debounce_ms: 700,
-                stall_soft_ms: 10_000,
-                stall_hard_ms: 30_000,
-                done_hold_ms: 1_500,
-                error_hold_ms: 2_500,
-            },
-        },
-    };
-    toml::to_string_pretty(&config).expect("TOML serialization failed")
 }
 
 // ---------------------------------------------------------------------------
@@ -512,19 +376,36 @@ fn section_channels(client: &DiscordClient) -> anyhow::Result<Vec<String>> {
 // Section 3: Agent Configuration
 // ---------------------------------------------------------------------------
 
-fn section_agent() -> (String, String) {
+fn section_agent() -> (String, String, bool) {
     println!();
     cprintln!(C.bold, "--- Step 3: Agent Configuration ---");
+    println!();
+
+    print_box(&[
+        "Agent Installation Guide",
+        "",
+        "claude:  npm install -g @anthropic-ai/claude-code",
+        "kiro:    npm install -g @koryhutchison/kiro-cli",
+        "codex:   npm install -g openai-codex (requires OpenAI API key)",
+        "gemini:  npm install -g @google/gemini-cli",
+        "",
+        "Make sure the agent is in your PATH before continuing.",
+    ]);
     println!();
 
     let choices = ["claude", "kiro", "codex", "gemini"];
     let idx = prompt_choice("  Select agent:", &choices);
     let agent = choices[idx];
 
-    let default_dir = match agent {
-        "kiro" => "/home/agent",
-        _ => "/home/node",
+    let deploy_choices = ["Local (current directory)", "Docker / k8s"];
+    let deploy_idx = prompt_choice("  Deployment target:", &deploy_choices);
+    let is_local = deploy_idx == 0;
+    let default_dir = match (is_local, agent) {
+        (true, _) => ".",
+        (false, "kiro") => "/home/agent",
+        (false, _) => "/home/node",
     };
+
     let working_dir = prompt_default("  Working directory", default_dir);
 
     cprintln!(
@@ -535,7 +416,7 @@ fn section_agent() -> (String, String) {
     );
     println!();
 
-    (agent.to_string(), working_dir)
+    (agent.to_string(), working_dir, is_local)
 }
 
 // ---------------------------------------------------------------------------
@@ -566,41 +447,6 @@ fn section_pool() -> (usize, u64) {
 }
 
 // ---------------------------------------------------------------------------
-// Section 5: Reactions
-// ---------------------------------------------------------------------------
-
-fn section_reactions() -> (bool, EmojisToml) {
-    println!();
-    cprintln!(C.bold, "--- Step 5: Reactions ---");
-    println!();
-
-    let enabled = prompt_yes_no("  Enable reactions?", true);
-
-    let emojis = EmojisToml {
-        queued: prompt_default("  Emoji: queued", "👀"),
-        thinking: prompt_default("  Emoji: thinking", "🤔"),
-        tool: prompt_default("  Emoji: tool", "🔥"),
-        coding: prompt_default("  Emoji: coding", "👨💻"),
-        web: prompt_default("  Emoji: web", "⚡"),
-        done: prompt_default("  Emoji: done", "🆗"),
-        error: prompt_default("  Emoji: error", "😱"),
-    };
-
-    cprintln!(
-        C.green,
-        "  Reactions: {} | Emojis set",
-        if enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
-    println!();
-
-    (enabled, emojis)
-}
-
-// ---------------------------------------------------------------------------
 // Preview & Save
 // ---------------------------------------------------------------------------
 
@@ -608,14 +454,14 @@ fn section_preview_and_save(config_content: &str, output_path: &PathBuf) -> anyh
     println!();
     cprintln!(C.bold, "--- Preview ---");
     println!();
-    println!("{}", config_content);
+    println!("{}", mask_bot_token(config_content));
     println!();
 
-    if output_path.exists() {
-        if !prompt_yes_no("  File exists. Overwrite?", false) {
-            println!("  Saving cancelled.");
-            return Ok(());
-        }
+    if output_path.exists()
+        && !prompt_yes_no("  File exists. Overwrite?", false)
+    {
+        println!("  Saving cancelled.");
+        return Ok(());
     }
 
     std::fs::write(output_path, config_content)?;
@@ -644,9 +490,9 @@ fn print_noninteractive_guide() {
         "  allowed_channels = [\"CHANNEL_ID\"]",
         "",
         "  [agent]",
-        "  command = \"claude\"",
-        "  args = []",
-        "  working_dir = \"/home/node\"",
+        "  command = \"kiro-cli\"",
+        "  args = [\"acp\", \"--trust-all-tools\"]",
+        "  working_dir = \"/home/agent\"",
         "",
         "  [pool]",
         "  max_sessions = 10",
@@ -657,6 +503,77 @@ fn print_noninteractive_guide() {
         "  remove_after_reply = false",
         "  ...",
     ]);
+}
+
+// ---------------------------------------------------------------------------
+// Next steps printer
+// ---------------------------------------------------------------------------
+
+fn print_next_steps(agent: &str, output_path: &Path, is_local: bool) {
+    println!();
+    cprintln!(C.bold, "--- Next Steps ---");
+    println!();
+
+    if is_local {
+        match agent {
+            "kiro" => {
+                cprintln!(C.cyan, "  1. Install kiro-cli (see https://kiro.dev for installer)");
+                cprintln!(C.cyan, "  2. Authenticate:");
+                println!("       kiro-cli login --use-device-flow");
+            }
+            "claude" => {
+                cprintln!(C.cyan, "  1. Install Claude Code + ACP adapter:");
+                println!("       npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp");
+                cprintln!(C.cyan, "  2. Authenticate:");
+                println!("       claude setup-token");
+            }
+            "codex" => {
+                cprintln!(C.cyan, "  1. Install Codex CLI + ACP adapter:");
+                println!("       npm install -g @openai/codex @zed-industries/codex-acp");
+                cprintln!(C.cyan, "  2. Authenticate:");
+                println!("       codex login --device-auth");
+            }
+            "gemini" => {
+                cprintln!(C.cyan, "  1. Install Gemini CLI:");
+                println!("       npm install -g @google/gemini-cli");
+                cprintln!(C.cyan, "  2. Authenticate via Google OAuth, or set GEMINI_API_KEY in config.toml");
+            }
+            _ => {}
+        }
+
+        println!();
+        cprintln!(C.green, "  3. Run the bot:");
+        println!("       cargo run -- run {}", output_path.display());
+    } else {
+        cprintln!(
+            C.cyan,
+            "  Docker image already bundles the agent CLI and ACP adapter."
+        );
+        println!();
+        cprintln!(C.cyan, "  1. Deploy with Helm (or your preferred method):");
+        println!("       helm install openab openab/openab \\");
+        println!("         --set agents.{}.discord.botToken=\"$BOT_TOKEN\"", agent);
+        println!();
+        cprintln!(C.cyan, "  2. Authenticate inside the pod (first time only):");
+        match agent {
+            "kiro" => println!(
+                "       kubectl exec -it deployment/openab-kiro -- kiro-cli login --use-device-flow"
+            ),
+            "claude" => println!(
+                "       kubectl exec -it deployment/openab-claude -- claude setup-token"
+            ),
+            "codex" => println!(
+                "       kubectl exec -it deployment/openab-codex -- codex login --device-auth"
+            ),
+            "gemini" => println!(
+                "       Set GEMINI_API_KEY via secret, or exec into the pod for OAuth"
+            ),
+            _ => {}
+        }
+        println!();
+        cprintln!(C.green, "  See README for full Helm options.");
+    }
+    println!();
 }
 
 // ---------------------------------------------------------------------------
@@ -734,13 +651,10 @@ pub fn run_setup(output_path: Option<PathBuf>) -> anyhow::Result<()> {
     };
 
     // Step 3: Agent
-    let (agent, working_dir) = section_agent();
+    let (agent, working_dir, is_local) = section_agent();
 
     // Step 4: Pool
     let (max_sessions, ttl_hours) = section_pool();
-
-    // Step 5: Reactions
-    let (reactions_enabled, emojis) = section_reactions();
 
     // Generate
     let config_content = generate_config(
@@ -750,112 +664,13 @@ pub fn run_setup(output_path: Option<PathBuf>) -> anyhow::Result<()> {
         &working_dir,
         max_sessions,
         ttl_hours,
-        reactions_enabled,
-        &emojis,
     );
 
     // Output
     let output_path = output_path.unwrap_or_else(|| PathBuf::from("config.toml"));
     section_preview_and_save(&config_content, &output_path)?;
 
-    cprintln!(
-        C.green,
-        "  Run with: openab run {}",
-        output_path.display()
-    );
-    println!();
+    print_next_steps(&agent, &output_path, is_local);
 
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_validate_bot_token_ok() {
-        assert!(validate_bot_token("simple_token").is_ok());
-        assert!(validate_bot_token("token.with-dashes_123").is_ok());
-        assert!(validate_bot_token("sk-ant-ic03-abcd/efgh").is_ok());
-    }
-
-    #[test]
-    fn test_validate_bot_token_reject_invalid() {
-        assert!(validate_bot_token("").is_err());
-        assert!(validate_bot_token("token\nnewline").is_err());
-        assert!(validate_bot_token("token\ttab").is_err());
-        assert!(validate_bot_token("token with space").is_err());
-    }
-
-    #[test]
-    fn test_validate_agent_command() {
-        for agent in &["kiro", "claude", "codex", "gemini"] {
-            assert!(validate_agent_command(agent).is_ok());
-        }
-        assert!(validate_agent_command("invalid").is_err());
-    }
-
-    #[test]
-    fn test_validate_channel_id() {
-        assert!(validate_channel_id("1492329565824094370").is_ok());
-        assert!(validate_channel_id("").is_err());
-        assert!(validate_channel_id("abc123").is_err());
-    }
-
-    #[test]
-    fn test_generate_config_contains_sections() {
-        let emojis = EmojisToml {
-            queued: "👀".into(),
-            thinking: "🤔".into(),
-            tool: "🔥".into(),
-            coding: "👨💻".into(),
-            web: "⚡".into(),
-            done: "🆗".into(),
-            error: "😱".into(),
-        };
-        let config = generate_config(
-            "my_token",
-            "claude",
-            vec!["123".to_string()],
-            "/home/node",
-            10,
-            24,
-            true,
-            &emojis,
-        );
-        assert!(config.contains("[discord]"));
-        assert!(config.contains("[agent]"));
-        assert!(config.contains("[pool]"));
-        assert!(config.contains("[reactions]"));
-    }
-
-    #[test]
-    fn test_generate_config_kiro_working_dir() {
-        let emojis = EmojisToml {
-            queued: "👀".into(),
-            thinking: "🤔".into(),
-            tool: "🔥".into(),
-            coding: "👨💻".into(),
-            web: "⚡".into(),
-            done: "🆗".into(),
-            error: "😱".into(),
-        };
-        let config = generate_config(
-            "tok",
-            "kiro",
-            vec!["ch".to_string()],
-            "/home/agent",
-            10,
-            24,
-            true,
-            &emojis,
-        );
-        assert!(config.contains(r#"working_dir = "/home/agent""#));
-        assert!(config.contains("acp"));
-        assert!(config.contains("--trust-all-tools"));
-    }
 }
