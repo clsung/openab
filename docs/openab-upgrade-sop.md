@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **Document Version** | 1.4 |
-| **Last Updated** | 2026-04-14 |
+| **Document Version** | 1.5 |
+| **Last Updated** | 2026-04-15 |
 
 ## Environment Reference
 
@@ -85,7 +85,7 @@
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    IV. Rollback                              │
-│  PREV_REVISION from backup helm-history.txt                 │
+│  PREV_REVISION from backup helm-history.json                │
 │  Machine-readable decision table → rollback → verify        │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -309,6 +309,8 @@ fi
 #### Step 0 — Resolve variables and create backup directory
 
 > **Output:** `BACKUP_DIR` appended to `openab-session-env.sh` → used in Steps 1–7 and the Verification Gate.
+>
+> **Why `POD` is not saved to `openab-session-env.sh`:** The pod name changes after every `helm upgrade` or `kubectl rollout restart` (new pod is created, old one is terminated). Persisting the pod name would cause subsequent steps to target a pod that no longer exists. Each step re-resolves `POD` at runtime to ensure it always refers to the currently running pod.
 
 ```bash
 source openab-session-env.sh
@@ -411,22 +413,33 @@ echo "🔐 SECURITY: secret.yaml contains credentials — do NOT commit. Encrypt
 echo "   gpg --symmetric $BACKUP_DIR/secret.yaml"
 ```
 
-#### Step 7 — Backup Helm release history and PVC data
+#### Step 7 — Backup Helm release history and full PVC snapshot
 
 > **Input:** `POD` (re-resolved) · **Output:** `$BACKUP_DIR/helm-history.txt`, `$BACKUP_DIR/pvc-data/`
+>
+> **Note on PVC overlap:** `pvc-data/` copies the entire `/home/agent` directory, which includes paths already backed up individually in Steps 2–5 (agents/, steering/, hosts.yml, kiro-auth.sqlite3). This overlap is **intentional** — the full PVC snapshot is the last-resort restore path if the new version ran a data migration that corrupts the PVC. The individual backups in Steps 2–5 are for fast, targeted restores; `pvc-data/` is for full rollback of PVC state.
+>
+> **Size threshold:** If the PVC is larger than ~500 MB, `kubectl cp` may be slow or time out. In that case, use the VolumeSnapshot option below instead.
 
 ```bash
 source openab-session-env.sh
 POD=$(kubectl get pod -l "app.kubernetes.io/instance=${RELEASE_NAME},app.kubernetes.io/name=${DEPLOYMENT}" -o jsonpath='{.items[0].metadata.name}')
 
 helm history "$RELEASE_NAME" > "$BACKUP_DIR/helm-history.txt"
-echo "✅ Helm history backed up"
-# This file is the source of truth for PREV_REVISION used in rollback
+helm history "$RELEASE_NAME" --output json > "$BACKUP_DIR/helm-history.json"
+echo "✅ Helm history backed up (text + JSON)"
+# helm-history.json is the source of truth for PREV_REVISION used in Section IV rollback
+# JSON format avoids column-shift parsing issues across Helm versions
 
-PVC_SIZE=$(kubectl exec "$POD" -- du -sh /home/agent 2>/dev/null | cut -f1)
-echo "PVC size: $PVC_SIZE"
+PVC_SIZE_BYTES=$(kubectl exec "$POD" -- du -sb /home/agent 2>/dev/null | cut -f1)
+PVC_SIZE_HUMAN=$(kubectl exec "$POD" -- du -sh /home/agent 2>/dev/null | cut -f1)
+echo "PVC size: $PVC_SIZE_HUMAN"
+if [ "${PVC_SIZE_BYTES:-0}" -gt 524288000 ]; then
+  echo "⚠️ PVC exceeds 500 MB — kubectl cp may be slow or time out."
+  echo "   Consider using the VolumeSnapshot option below instead."
+fi
 kubectl cp "$POD:/home/agent/" "$BACKUP_DIR/pvc-data/"
-echo "✅ PVC data backed up"
+echo "✅ Full PVC snapshot backed up"
 ```
 
 > **Advanced option — VolumeSnapshot (for large PVCs or CSI-enabled clusters):**
@@ -483,7 +496,8 @@ check_dir  "$BACKUP_DIR/steering/"            "Steering files"
 check_file "$BACKUP_DIR/hosts.yml"            "GitHub CLI credentials"
 check_file "$BACKUP_DIR/kiro-auth.sqlite3"    "kiro-cli auth DB"
 check_file "$BACKUP_DIR/secret.yaml"          "Kubernetes Secret"
-check_file "$BACKUP_DIR/helm-history.txt"     "Helm history"
+check_file "$BACKUP_DIR/helm-history.txt"     "Helm history (text)"
+check_file "$BACKUP_DIR/helm-history.json"    "Helm history (JSON — used for PREV_REVISION)"
 check_dir  "$BACKUP_DIR/pvc-data/"            "PVC data"
 
 echo ""
@@ -565,6 +579,8 @@ echo "✅ Automated smoke test passed."
 ```
 
 **After automated smoke test — human Discord validation required:**
+
+> **Agent note:** If running in a non-interactive shell (no stdin available), skip the `read` command below. Instead, report to the user that human confirmation is required and pause execution. Resume only after the user explicitly provides `CONFIRMED` or `ROLLBACK`.
 
 ```bash
 # ⏸ HUMAN CONFIRMATION REQUIRED
@@ -675,6 +691,8 @@ echo "✅ All automated checks passed."
 
 **After automated checks — human Discord E2E confirmation:**
 
+> **Agent note:** If running in a non-interactive shell (no stdin available), skip the `read` command below. Instead, report to the user that human confirmation is required and pause execution. Resume only after the user explicitly provides `CONFIRMED` or `ROLLBACK`.
+
 ```bash
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "⏸  PAUSED — Human E2E validation required"
@@ -713,6 +731,14 @@ fi
 
 ## IV. Rollback
 
+> ⚠️ **`helm rollback` does NOT revert PVC data.** Helm only rolls back Kubernetes resources (Deployment, ConfigMap, Secret, etc.). The PVC and its contents remain as-is after rollback.
+>
+> If the new version ran a data migration on startup, the old version may not be compatible with the modified PVC data. In that case, restore PVC data from the Step 7 backup **before** running `helm rollback`:
+> ```bash
+> # Restore PVC data from backup first (see "Restore Custom Config" below)
+> # Then run helm rollback
+> ```
+
 ### Decision Table (Machine-Readable)
 
 > **Agent instruction:** Evaluate conditions in order. Execute the action for the first matching row. Only one action should be taken per rollback event.
@@ -728,28 +754,30 @@ fi
 
 ### Helm Rollback
 
-> **Agent instruction:** `PREV_REVISION` is resolved from the backup's `helm-history.txt` (saved before any upgrade occurred). This avoids the ambiguity of "倒數第二個" when multiple `helm upgrade` calls were made during the upgrade process (pre-release + stable).
+> **Agent instruction:** `PREV_REVISION` is resolved from `helm-history.json` saved during Step 7 (before any upgrade occurred). Using the JSON format avoids column-shift parsing issues across Helm versions. This also avoids the ambiguity of "second-to-last revision" when multiple `helm upgrade` calls were made (pre-release + stable).
 
 ```bash
 source openab-session-env.sh
 
 # Validate BACKUP_DIR is set and helm-history.txt exists
-if [ -z "$BACKUP_DIR" ] || [ ! -f "$BACKUP_DIR/helm-history.txt" ]; then
-  echo "❌ BACKUP_DIR not set or helm-history.txt missing."
-  echo "   Resolve manually: helm history $RELEASE_NAME"
+if [ -z "$BACKUP_DIR" ] || [ ! -f "$BACKUP_DIR/helm-history.json" ]; then
+  echo "❌ BACKUP_DIR not set or helm-history.json missing."
+  echo "   Resolve manually: helm history $RELEASE_NAME --output json | jq"
   exit 1
 fi
 
 echo "Using backup: $BACKUP_DIR"
 echo "Backup timestamp: $(echo "$BACKUP_DIR" | grep -oE '[0-9]{8}-[0-9]{6}')"
 
-# Resolve the pre-upgrade stable revision from the backup
+# Resolve the pre-upgrade stable revision from the backup JSON
 # (the last revision with status "deployed" at the time of backup)
-PREV_REVISION=$(awk 'NR>1 && $3=="deployed" {rev=$1} END {print rev}' "$BACKUP_DIR/helm-history.txt")
-if [ -z "$PREV_REVISION" ]; then
-  echo "❌ Could not resolve PREV_REVISION from helm-history.txt."
-  echo "   Contents of helm-history.txt:"
-  cat "$BACKUP_DIR/helm-history.txt"
+# Uses JSON format saved during Step 7 — avoids column-shift parsing issues across Helm versions
+PREV_REVISION=$(jq -r '[.[] | select(.status == "deployed")] | sort_by(.revision) | last | .revision' \
+  "$BACKUP_DIR/helm-history.json" 2>/dev/null)
+if [ -z "$PREV_REVISION" ] || [ "$PREV_REVISION" = "null" ]; then
+  echo "❌ Could not resolve PREV_REVISION from helm-history.json."
+  echo "   Contents of helm-history.json:"
+  cat "$BACKUP_DIR/helm-history.json"
   echo ""
   echo "   Set PREV_REVISION manually and re-run: helm rollback $RELEASE_NAME <REVISION>"
   exit 1
