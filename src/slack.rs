@@ -295,17 +295,26 @@ pub async fn run_slack_adapter(
                                         let event_type = event["type"].as_str().unwrap_or("");
                                         match event_type {
                                             "app_mention" => {
-                                                handle_message(
-                                                    event,
-                                                    true,
-                                                    &adapter,
-                                                    &bot_token,
-                                                    &allowed_channels,
-                                                    &allowed_users,
-                                                    &stt_config,
-                                                    &router,
-                                                )
-                                                .await;
+                                                let event = event.clone();
+                                                let adapter = adapter.clone();
+                                                let bot_token = bot_token.clone();
+                                                let allowed_channels = allowed_channels.clone();
+                                                let allowed_users = allowed_users.clone();
+                                                let stt_config = stt_config.clone();
+                                                let router = router.clone();
+                                                tokio::spawn(async move {
+                                                    handle_message(
+                                                        &event,
+                                                        true,
+                                                        &adapter,
+                                                        &bot_token,
+                                                        &allowed_channels,
+                                                        &allowed_users,
+                                                        &stt_config,
+                                                        &router,
+                                                    )
+                                                    .await;
+                                                });
                                             }
                                             "message" => {
                                                 // Handle thread follow-ups without @mention.
@@ -337,17 +346,26 @@ pub async fn run_slack_adapter(
                                                     "channel_topic" | "channel_purpose"
                                                 );
                                                 if has_thread && !is_bot && !skip_subtype && !mentions_bot {
-                                                    handle_message(
-                                                        event,
-                                                        false,
-                                                        &adapter,
-                                                        &bot_token,
-                                                        &allowed_channels,
-                                                        &allowed_users,
-                                                        &stt_config,
-                                                        &router,
-                                                    )
-                                                    .await;
+                                                    let event = event.clone();
+                                                    let adapter = adapter.clone();
+                                                    let bot_token = bot_token.clone();
+                                                    let allowed_channels = allowed_channels.clone();
+                                                    let allowed_users = allowed_users.clone();
+                                                    let stt_config = stt_config.clone();
+                                                    let router = router.clone();
+                                                    tokio::spawn(async move {
+                                                        handle_message(
+                                                            &event,
+                                                            false,
+                                                            &adapter,
+                                                            &bot_token,
+                                                            &allowed_channels,
+                                                            &allowed_users,
+                                                            &stt_config,
+                                                            &router,
+                                                        )
+                                                        .await;
+                                                    });
                                                 }
                                             }
                                             _ => {}

@@ -289,7 +289,7 @@ impl AdapterRouter {
                                     }
                                     text_buf.push_str(&t);
                                     let _ =
-                                        buf_tx.send(compose_display(&tool_lines, &text_buf));
+                                        buf_tx.send(compose_display(&tool_lines, &text_buf, true));
                                 }
                                 AcpEvent::Thinking => {
                                     reactions.set_thinking().await;
@@ -308,7 +308,7 @@ impl AdapterRouter {
                                         });
                                     }
                                     let _ =
-                                        buf_tx.send(compose_display(&tool_lines, &text_buf));
+                                        buf_tx.send(compose_display(&tool_lines, &text_buf, true));
                                 }
                                 AcpEvent::ToolDone { id, title, status } => {
                                     reactions.set_thinking().await;
@@ -330,7 +330,7 @@ impl AdapterRouter {
                                         });
                                     }
                                     let _ =
-                                        buf_tx.send(compose_display(&tool_lines, &text_buf));
+                                        buf_tx.send(compose_display(&tool_lines, &text_buf, true));
                                 }
                                 _ => {}
                             }
@@ -342,7 +342,7 @@ impl AdapterRouter {
                     let _ = edit_handle.await;
 
                     // Final edit with complete content
-                    let final_content = compose_display(&tool_lines, &text_buf);
+                    let final_content = compose_display(&tool_lines, &text_buf, false);
                     let final_content = if final_content.is_empty() {
                         if let Some(err) = response_error {
                             format!("⚠️ {err}")
@@ -405,14 +405,51 @@ impl ToolEntry {
     }
 }
 
-fn compose_display(tool_lines: &[ToolEntry], text: &str) -> String {
+/// Maximum number of finished tool entries to show individually
+/// during streaming before collapsing into a summary line.
+const TOOL_COLLAPSE_THRESHOLD: usize = 3;
+
+fn compose_display(tool_lines: &[ToolEntry], text: &str, streaming: bool) -> String {
     let mut out = String::new();
     if !tool_lines.is_empty() {
-        for entry in tool_lines {
-            out.push_str(&entry.render());
-            out.push('\n');
+        if streaming {
+            let done = tool_lines.iter().filter(|e| e.state == ToolState::Completed).count();
+            let failed = tool_lines.iter().filter(|e| e.state == ToolState::Failed).count();
+            let running: Vec<_> = tool_lines.iter().filter(|e| e.state == ToolState::Running).collect();
+            let finished = done + failed;
+
+            if finished <= TOOL_COLLAPSE_THRESHOLD {
+                for entry in tool_lines.iter().filter(|e| e.state != ToolState::Running) {
+                    out.push_str(&entry.render());
+                    out.push('\n');
+                }
+            } else {
+                let mut parts = Vec::new();
+                if done > 0 { parts.push(format!("✅ {done}")); }
+                if failed > 0 { parts.push(format!("❌ {failed}")); }
+                out.push_str(&format!("{} tool(s) completed\n", parts.join(" · ")));
+            }
+
+            if running.len() <= TOOL_COLLAPSE_THRESHOLD {
+                for entry in &running {
+                    out.push_str(&entry.render());
+                    out.push('\n');
+                }
+            } else {
+                let hidden = running.len() - TOOL_COLLAPSE_THRESHOLD;
+                out.push_str(&format!("🔧 {hidden} more running\n"));
+                for entry in running.iter().skip(hidden) {
+                    out.push_str(&entry.render());
+                    out.push('\n');
+                }
+            }
+        } else {
+            for entry in tool_lines {
+                out.push_str(&entry.render());
+                out.push('\n');
+            }
         }
-        out.push('\n');
+        if !out.is_empty() { out.push('\n'); }
     }
     out.push_str(text.trim_end());
     out
