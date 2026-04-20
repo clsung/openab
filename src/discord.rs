@@ -764,7 +764,46 @@ async fn get_or_create_thread(
         parent_id: None,
     };
     let trigger_ref = discord_msg_ref(msg);
-    adapter.create_thread(&parent, &trigger_ref, &thread_name).await
+    match adapter.create_thread(&parent, &trigger_ref, &thread_name).await {
+        Ok(ch) => Ok(ch),
+        Err(e) if is_thread_already_exists_error(&e) => {
+            // Another bot won the race from the same trigger message. Discord
+            // only allows one thread per message, so refetch the message and
+            // join the thread our sibling just created.
+            let refreshed = msg
+                .channel_id
+                .message(&ctx.http, msg.id)
+                .await
+                .map_err(|fe| anyhow::anyhow!(
+                    "thread_already_exists (race), but refetch failed: {fe}"
+                ))?;
+            let existing = refreshed.thread.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "thread_already_exists (race), but message has no thread after refetch"
+                )
+            })?;
+            tracing::info!(
+                channel_id = %msg.channel_id,
+                thread_id = %existing.id,
+                "joining thread created by sibling bot from same trigger message"
+            );
+            Ok(ChannelRef {
+                platform: "discord".into(),
+                channel_id: existing.id.to_string(),
+                thread_id: None,
+                parent_id: Some(msg.channel_id.get().to_string()),
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Detect Discord's "A thread has already been created for this message" error
+/// (JSON error code 160004). Triggered when two bots responding to the same
+/// @-mention race to create a thread from the same trigger message.
+fn is_thread_already_exists_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("160004") || msg.contains("already been created")
 }
 
 static ROLE_MENTION_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -852,6 +891,35 @@ mod tests {
         let bot_id = UserId::new(111);
         let result = resolve_mentions("<@111>", bot_id);
         assert_eq!(result, "");
+    }
+
+    // --- thread-race error detection ---
+
+    /// Detects the Discord error code for "thread already exists" (160004).
+    #[test]
+    fn is_thread_already_exists_matches_code() {
+        let err = anyhow::Error::msg(
+            r#"HTTP error: {"code": 160004, "message": "A thread has already been created for this message."}"#,
+        );
+        assert!(is_thread_already_exists_error(&err));
+    }
+
+    /// Detects the human-readable form of the error in case serenity renders
+    /// it without the numeric code.
+    #[test]
+    fn is_thread_already_exists_matches_message() {
+        let err = anyhow::anyhow!("A thread has already been created for this message.");
+        assert!(is_thread_already_exists_error(&err));
+    }
+
+    /// Unrelated errors do not match — we don't want the fallback path
+    /// swallowing real failures like permission denied.
+    #[test]
+    fn is_thread_already_exists_ignores_other_errors() {
+        let err = anyhow::anyhow!("Missing Permissions");
+        assert!(!is_thread_already_exists_error(&err));
+        let err = anyhow::anyhow!("rate limit exceeded");
+        assert!(!is_thread_already_exists_error(&err));
     }
 
     // --- should_process_user_message tests (GIVEN/WHEN/THEN) ---
