@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 use serenity::builder::{CreateActionRow, CreateCommand, CreateInteractionResponse, CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread};
 use serenity::http::Http;
 use serenity::model::application::{ComponentInteractionDataKind, Interaction};
-use serenity::model::channel::{AutoArchiveDuration, Message, ReactionType};
+use serenity::model::channel::{AutoArchiveDuration, Message, MessageType, ReactionType};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, MessageId, UserId};
 use serenity::prelude::*;
@@ -269,7 +269,9 @@ impl EventHandler for Handler {
                     TurnResult::Throttled => return,
                     TurnResult::Ok => {}
                 }
-            } else {
+            } else if matches!(msg.kind, MessageType::Regular | MessageType::InlineReply)
+                && !msg.content.is_empty()
+            {
                 tracker.on_human_message(&thread_key);
             }
         }
@@ -1157,5 +1159,18 @@ mod tests {
         assert_eq!(t.on_bot_message("t1"), TurnResult::HardLimit);
         // Past — silent
         assert_eq!(t.on_bot_message("t1"), TurnResult::Stopped);
+    }
+
+    /// Regression test for #497: system messages (thread created, pin, etc.)
+    /// should NOT reset the bot turn counter. The filtering happens at the
+    /// call site (MessageType check); this verifies the counter stays put
+    /// when on_human_message is never called.
+    #[test]
+    fn system_message_does_not_reset_counter() {
+        let mut t = BotTurnTracker::new(3);
+        assert_eq!(t.on_bot_message("t1"), TurnResult::Ok);
+        assert_eq!(t.on_bot_message("t1"), TurnResult::Ok);
+        // No on_human_message (system message filtered out at call site)
+        assert_eq!(t.on_bot_message("t1"), TurnResult::SoftLimit(3));
     }
 }
