@@ -31,7 +31,7 @@ struct Cli {
 enum Commands {
     /// Run the bot (default)
     Run {
-        /// Config file path (default: config.toml)
+        /// Config file path or URL (default: config.toml)
         config: Option<String>,
     },
     /// Launch the interactive setup wizard
@@ -40,6 +40,9 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Implicit run with config path/URL (not shown in help)
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[tokio::main]
@@ -53,13 +56,17 @@ async fn main() -> anyhow::Result<()> {
 
     let cmd = Cli::parse().command.unwrap_or(Commands::Run { config: None });
 
-    match cmd {
+    let config_arg = match cmd {
         Commands::Setup { output } => {
             setup::run_setup(output.map(PathBuf::from))?;
-            Ok(())
+            return Ok(());
         }
-        Commands::Run { config } => {
-            let config_source = config.unwrap_or_else(|| "config.toml".into());
+        Commands::Run { config } => config,
+        Commands::External(args) => args.into_iter().next(),
+    };
+
+    // -- Run path --
+    let config_source = config_arg.unwrap_or_else(|| "config.toml".into());
 
             let mut cfg = if config_source.starts_with("http://") || config_source.starts_with("https://") {
                 info!(url = %config_source, "fetching remote config");
@@ -235,8 +242,6 @@ async fn main() -> anyhow::Result<()> {
             shutdown_pool.shutdown().await;
             info!("openab shut down");
             Ok(())
-        }
-    }
 }
 
 fn parse_id_set(raw: &[String], label: &str) -> anyhow::Result<HashSet<u64>> {
