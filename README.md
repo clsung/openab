@@ -4,7 +4,7 @@
 
 ![OpenAB banner](images/banner.jpg)
 
-A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, Copilot CLI, etc.) over stdio JSON-RPC — delivering the next-generation development experience.
+A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**, and any [Agent Client Protocol](https://github.com/anthropics/agent-protocol)-compatible coding CLI (Kiro CLI, Claude Code, Codex, Gemini, OpenCode, Copilot CLI, etc.) over stdio JSON-RPC — delivering the next-generation development experience. **Telegram, LINE**, and other webhook-based platforms are supported via the standalone [Custom Gateway](gateway/).
 
 🪼 **Join our community!** Come say hi on Discord — we'd love to have you: **[🪼 OpenAB — Official](https://discord.gg/YNksK9M6)** 🎉
 
@@ -17,11 +17,12 @@ A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**,
 │   User       │               └──────┬───────┘
 ├──────────────┤                      │ WebSocket (outbound)
 │   Telegram   │◄──webhook──┐         │
-│   User       │            ▼         ▼
-└──────────────┘     ┌──────────────────┐
-                     │  Custom Gateway  │
-                     │  (standalone)    │
-                     └──────────────────┘
+│   User       │            │         │
+├──────────────┤            ▼         ▼
+│   LINE       │◄──webhook──┌──────────────────┐
+│   User       │            │  Custom Gateway  │
+└──────────────┘            │  (standalone)    │
+                            └──────────────────┘
 ```
 
 ## Demo
@@ -63,6 +64,13 @@ See [docs/slack-bot-howto.md](docs/slack-bot-howto.md) for a detailed step-by-st
 <summary><strong>Telegram</strong> (via Custom Gateway)</summary>
 
 See [docs/telegram.md](docs/telegram.md) for the full setup guide. Requires the standalone [Custom Gateway](gateway/) service.
+
+</details>
+
+<details>
+<summary><strong>LINE</strong> (via Custom Gateway)</summary>
+
+See [docs/line.md](docs/line.md) for the full setup guide. Requires the standalone [Custom Gateway](gateway/) service.
 
 </details>
 
