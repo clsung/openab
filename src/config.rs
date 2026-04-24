@@ -35,6 +35,7 @@ impl<'de> Deserialize<'de> for AllowBots {
 pub struct Config {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
+    pub gateway: Option<GatewayConfig>,
     pub agent: AgentConfig,
     #[serde(default)]
     pub pool: PoolConfig,
@@ -157,6 +158,21 @@ pub struct SlackConfig {
     /// Human message resets the counter. Default: 20.
     #[serde(default = "default_max_bot_turns")]
     pub max_bot_turns: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GatewayConfig {
+    /// WebSocket URL of the custom gateway (e.g. ws://gateway:8080/ws)
+    pub url: String,
+    /// Platform name for session key namespacing (e.g. "telegram", "line")
+    #[serde(default = "default_gateway_platform")]
+    pub platform: String,
+    /// Shared token for WebSocket authentication (optional but recommended)
+    pub token: Option<String>,
+}
+
+fn default_gateway_platform() -> String {
+    "telegram".into()
 }
 
 #[derive(Debug, Deserialize)]
