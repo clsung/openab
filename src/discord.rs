@@ -538,7 +538,8 @@ impl EventHandler for Handler {
             msg.author.bot,
         );
 
-        // Build extra content blocks from attachments (audio → STT, text → inline, image → encode)
+        // Build extra content blocks from attachments (audio -> STT, text -> inline,
+        // image -> encode, video -> URL for agent-side inspection).
         let mut extra_blocks = Vec::new();
         let mut text_file_bytes: u64 = 0;
         let mut text_file_count: u32 = 0;
@@ -599,6 +600,18 @@ impl EventHandler for Handler {
             ).await {
                 debug!(url = %attachment.url, filename = %attachment.filename, "adding image attachment");
                 extra_blocks.push(block);
+            } else if media::is_video_file(&attachment.filename, attachment.content_type.as_deref()) {
+                let content_type = attachment.content_type.as_deref().unwrap_or("unknown");
+                debug!(url = %attachment.url, filename = %attachment.filename, "adding video attachment link");
+                extra_blocks.push(ContentBlock::Text {
+                    text: format!(
+                        "[Video attachment]\nfilename: {}\ncontent_type: {}\nsize_bytes: {}\nurl: {}",
+                        attachment.filename,
+                        content_type,
+                        attachment.size,
+                        attachment.url
+                    ),
+                });
             }
         }
 
