@@ -1398,7 +1398,7 @@ impl Handler {
         }
 
         let filter = if let Some(n) = limit_opt {
-            if n < 1 || n > 5000 {
+            if !(1..=5000).contains(&n) {
                 let response = CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
                         .content("⚠️ `limit` must be between 1 and 5000.")
@@ -1425,7 +1425,7 @@ impl Handler {
                 }
             }
         } else if let Some(d) = days_opt {
-            if d < 1 || d > 365 {
+            if !(1..=365).contains(&d) {
                 let response = CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
                         .content("⚠️ `days` must be between 1 and 365.")
@@ -1745,16 +1745,13 @@ async fn export_channel_messages(
                 } else {
                     probe
                 };
-                match channel_id.messages(http, probe).await {
-                    Ok(batch) => {
-                        // If the next message is beyond our filter boundary,
-                        // we didn't actually leave relevant messages behind.
-                        let has_more_in_window = batch.iter().any(|m| m.id > *after_id);
-                        if !has_more_in_window {
-                            hit_cap = false;
-                        }
+                if let Ok(batch) = channel_id.messages(http, probe).await {
+                    // If the next message is beyond our filter boundary,
+                    // we didn't actually leave relevant messages behind.
+                    let has_more_in_window = batch.iter().any(|m| m.id > *after_id);
+                    if !has_more_in_window {
+                        hit_cap = false;
                     }
-                    Err(_) => {} // probe failure is non-fatal
                 }
             }
             messages.reverse();
