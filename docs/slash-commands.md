@@ -69,7 +69,28 @@ This is equivalent to the `sessions close` + `sessions new` pattern used by [Ope
 
 Fetches the current Discord thread or DM history and returns a `.txt` file as an ephemeral follow-up. The transcript includes message timestamps, author names and IDs, message text, and attachment URLs.
 
-The command only works in allowed Discord threads or enabled DMs. Very large threads are capped and may be truncated to fit Discord's attachment size limit.
+**Optional parameters** (mutually exclusive — use at most one):
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `limit` | Integer | Export only the most recent N messages (1–5000) |
+| `since` | String | Export messages after this date, format `YYYY-MM-DD` (interpreted as UTC midnight) |
+| `days` | Integer | Export messages from the last N days (1–365) |
+
+If no parameter is provided, all messages are exported (capped at 5000).
+
+**Examples:**
+```
+/export-thread                    → export all (cap 5000)
+/export-thread limit:100          → most recent 100 messages
+/export-thread since:2026-05-10   → messages after 2026-05-10 00:00 UTC
+/export-thread days:3             → messages from the last 3 days
+```
+
+**Constraints:**
+- Only works in allowed Discord threads or enabled DMs.
+- Specifying more than one filter returns an error.
+- Very large exports may be truncated to fit Discord's attachment size limit.
 
 ## Passing CLI Commands via @mention
 

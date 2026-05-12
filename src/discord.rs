@@ -842,7 +842,22 @@ impl EventHandler for Handler {
                     "Delay before firing (e.g. 30m, 2h, 1d)",
                 ).required(true)),
             CreateCommand::new("export-thread")
-                .description("Download this thread as a text file"),
+                .description("Download this thread as a text file")
+                .add_option(CreateCommandOption::new(
+                    CommandOptionType::Integer,
+                    "limit",
+                    "Export only the most recent N messages (1–5000)",
+                ))
+                .add_option(CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "since",
+                    "Export messages after this date (YYYY-MM-DD, UTC)",
+                ))
+                .add_option(CreateCommandOption::new(
+                    CommandOptionType::Integer,
+                    "days",
+                    "Export messages from the last N days (1–365)",
+                )),
         ];
 
         // Register global commands (works in DMs + all guilds after propagation).
@@ -1365,6 +1380,67 @@ impl Handler {
             return;
         }
 
+        // --- Parse and validate filter params (mutual exclusion) ---
+        let opts = &cmd.data.options;
+        let limit_opt = opts.iter().find(|o| o.name == "limit").and_then(|o| o.value.as_i64());
+        let since_opt = opts.iter().find(|o| o.name == "since").and_then(|o| o.value.as_str());
+        let days_opt = opts.iter().find(|o| o.name == "days").and_then(|o| o.value.as_i64());
+
+        let filter_count = limit_opt.is_some() as u8 + since_opt.is_some() as u8 + days_opt.is_some() as u8;
+        if filter_count > 1 {
+            let response = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("⚠️ Please specify only one filter: `limit`, `since`, or `days`.")
+                    .ephemeral(true),
+            );
+            let _ = cmd.create_response(&ctx.http, response).await;
+            return;
+        }
+
+        let filter = if let Some(n) = limit_opt {
+            if n < 1 || n > 5000 {
+                let response = CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("⚠️ `limit` must be between 1 and 5000.")
+                        .ephemeral(true),
+                );
+                let _ = cmd.create_response(&ctx.http, response).await;
+                return;
+            }
+            ExportFilter::Limit(n as usize)
+        } else if let Some(date_str) = since_opt {
+            match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                Ok(date) => {
+                    let ts_ms = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as u64;
+                    ExportFilter::After(timestamp_ms_to_snowflake(ts_ms))
+                }
+                Err(_) => {
+                    let response = CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("⚠️ `since` must be a valid date in YYYY-MM-DD format (UTC).")
+                            .ephemeral(true),
+                    );
+                    let _ = cmd.create_response(&ctx.http, response).await;
+                    return;
+                }
+            }
+        } else if let Some(d) = days_opt {
+            if d < 1 || d > 365 {
+                let response = CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content("⚠️ `days` must be between 1 and 365.")
+                        .ephemeral(true),
+                );
+                let _ = cmd.create_response(&ctx.http, response).await;
+                return;
+            }
+            let since_ts = chrono::Utc::now() - chrono::Duration::days(d);
+            let ts_ms = since_ts.timestamp_millis() as u64;
+            ExportFilter::After(timestamp_ms_to_snowflake(ts_ms))
+        } else {
+            ExportFilter::All
+        };
+
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new()
                 .content("Preparing thread export...")
@@ -1380,6 +1456,7 @@ impl Handler {
             channel_id,
             &export_name,
             cmd.attachment_size_limit,
+            filter,
         )
         .await
         {
@@ -1543,11 +1620,32 @@ struct ExportResult {
     /// Messages that fit in the transcript (≤ `fetched`; differs when the
     /// attachment-size limit truncates).
     written: usize,
-    /// We stopped fetching because we hit `THREAD_EXPORT_MESSAGE_LIMIT` and the
-    /// thread still has older messages we did not include.
+    /// We stopped fetching because we hit the message cap and the thread still
+    /// has more messages we did not include.
     hit_cap: bool,
     /// Transcript was cut to keep the attachment under Discord's size limit.
     byte_truncated: bool,
+}
+
+/// Filter mode for export_channel_messages.
+enum ExportFilter {
+    /// Fetch all messages (newest-first via `before`), capped at THREAD_EXPORT_MESSAGE_LIMIT.
+    All,
+    /// Fetch the most recent N messages (newest-first via `before`).
+    Limit(usize),
+    /// Fetch messages after a synthetic snowflake (oldest-first via `after`).
+    After(MessageId),
+}
+
+/// Discord epoch: 2015-01-01T00:00:00Z in milliseconds.
+const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+
+/// Convert a UTC timestamp (in milliseconds since Unix epoch) to a synthetic
+/// Discord snowflake suitable for use as an `after` cursor.
+fn timestamp_ms_to_snowflake(timestamp_ms: u64) -> MessageId {
+    let discord_ms = timestamp_ms.saturating_sub(DISCORD_EPOCH_MS);
+    // Snowflake IDs use NonZeroU64 in serenity; ensure at least 1.
+    MessageId::new((discord_ms << 22).max(1))
 }
 
 async fn export_channel_messages(
@@ -1555,55 +1653,89 @@ async fn export_channel_messages(
     channel_id: ChannelId,
     channel_name: &str,
     attachment_size_limit: u32,
+    filter: ExportFilter,
 ) -> anyhow::Result<ExportResult> {
+    let cap = match &filter {
+        ExportFilter::Limit(n) => *n,
+        _ => THREAD_EXPORT_MESSAGE_LIMIT,
+    };
+
     let mut messages = Vec::new();
-    let mut before = None;
     let mut hit_cap = false;
 
-    // Fetches newest-first using `before` pagination, then reverses at the end.
-    // The hit_cap disclosure ("most recent N messages") relies on this direction.
-    loop {
-        if messages.len() >= THREAD_EXPORT_MESSAGE_LIMIT {
-            hit_cap = true;
-            break;
+    match &filter {
+        ExportFilter::All | ExportFilter::Limit(_) => {
+            // Fetch newest-first using `before` pagination, then reverse.
+            let mut before = None;
+            loop {
+                if messages.len() >= cap {
+                    hit_cap = true;
+                    break;
+                }
+                let remaining = cap - messages.len();
+                let limit = remaining.min(100) as u8;
+                let mut request = GetMessages::new().limit(limit);
+                if let Some(before_id) = before {
+                    request = request.before(before_id);
+                }
+                let batch = channel_id.messages(http, request).await?;
+                if batch.is_empty() {
+                    break;
+                }
+                before = batch.last().map(|m| m.id);
+                let batch_len = batch.len();
+                messages.extend(batch);
+                if batch_len < limit as usize {
+                    break;
+                }
+            }
+            // Probe to confirm we actually left messages behind.
+            if hit_cap {
+                let probe = GetMessages::new().limit(1);
+                let probe = if let Some(before_id) = before {
+                    probe.before(before_id)
+                } else {
+                    probe
+                };
+                if matches!(channel_id.messages(http, probe).await, Ok(b) if b.is_empty()) {
+                    hit_cap = false;
+                }
+            }
+            messages.reverse();
         }
-        let remaining = THREAD_EXPORT_MESSAGE_LIMIT - messages.len();
-        let limit = remaining.min(100) as u8;
-        let mut request = GetMessages::new().limit(limit);
-        if let Some(before_id) = before {
-            request = request.before(before_id);
-        }
-
-        let batch = channel_id.messages(http, request).await?;
-        if batch.is_empty() {
-            break;
-        }
-
-        before = batch.last().map(|m| m.id);
-        let batch_len = batch.len();
-        messages.extend(batch);
-
-        if batch_len < limit as usize {
-            break;
+        ExportFilter::After(after_id) => {
+            // Fetch oldest-first using `after` pagination (already chronological).
+            let mut after = *after_id;
+            loop {
+                if messages.len() >= cap {
+                    hit_cap = true;
+                    break;
+                }
+                let remaining = cap - messages.len();
+                let limit = remaining.min(100) as u8;
+                let request = GetMessages::new().limit(limit).after(after);
+                let batch = channel_id.messages(http, request).await?;
+                if batch.is_empty() {
+                    break;
+                }
+                // Discord returns newest-first even with `after`, so sort ascending.
+                let mut batch = batch;
+                batch.sort_by_key(|m| m.id);
+                after = batch.last().unwrap().id;
+                let batch_len = batch.len();
+                messages.extend(batch);
+                if batch_len < limit as usize {
+                    break;
+                }
+            }
+            if hit_cap {
+                let probe = GetMessages::new().limit(1).after(after);
+                if matches!(channel_id.messages(http, probe).await, Ok(b) if b.is_empty()) {
+                    hit_cap = false;
+                }
+            }
         }
     }
-
-    // If we stopped at the cap, probe one more message to confirm the thread
-    // really has more — avoids a misleading "we left some behind" disclosure
-    // in the exact-multiple-of-cap case. Probe failure is non-fatal.
-    if hit_cap {
-        let probe = GetMessages::new().limit(1);
-        let probe = if let Some(before_id) = before {
-            probe.before(before_id)
-        } else {
-            probe
-        };
-        if matches!(channel_id.messages(http, probe).await, Ok(b) if b.is_empty()) {
-            hit_cap = false;
-        }
-    }
-
-    messages.reverse();
 
     let filename = export_filename(channel_id, channel_name);
     if attachment_size_limit < 2048 {
@@ -1611,10 +1743,6 @@ async fn export_channel_messages(
     }
     let max_bytes = usize::try_from(attachment_size_limit)
         .unwrap_or(8 * 1024 * 1024)
-        // Reserve ~1 KiB for the transcript header (channel name + ID + counts)
-        // and the optional truncation footer so the final `.txt` stays under
-        // Discord's interaction-attachment size limit. `.max(1024)` keeps us
-        // from accidentally hitting zero on a tiny limit.
         .saturating_sub(1024)
         .max(1024);
     let (transcript, written, byte_truncated) =
@@ -2177,6 +2305,34 @@ mod tests {
         assert_eq!(written, 2);
         assert!(truncated);
         assert!(out.contains("[Export truncated"));
+    }
+
+    // --- snowflake conversion ---
+
+    #[test]
+    fn timestamp_ms_to_snowflake_known_value() {
+        // 2026-05-10 00:00:00 UTC = 1778572800000 ms since Unix epoch
+        // Discord ms = 1778572800000 - 1420070400000 = 358502400000
+        // Snowflake = 358502400000 << 22 = 1503238553600000000 (approx)
+        let ts_ms: u64 = 1_778_572_800_000;
+        let snowflake = timestamp_ms_to_snowflake(ts_ms);
+        // Verify round-trip: extract timestamp back from snowflake
+        let extracted_ms = (snowflake.get() >> 22) + DISCORD_EPOCH_MS;
+        assert_eq!(extracted_ms, ts_ms);
+    }
+
+    #[test]
+    fn timestamp_ms_to_snowflake_at_discord_epoch_is_one() {
+        // At exactly the Discord epoch, discord_ms=0, shifted=0, clamped to 1
+        let snowflake = timestamp_ms_to_snowflake(DISCORD_EPOCH_MS);
+        assert_eq!(snowflake.get(), 1);
+    }
+
+    #[test]
+    fn timestamp_ms_to_snowflake_before_epoch_saturates() {
+        // Timestamp before Discord epoch should saturate to 1
+        let snowflake = timestamp_ms_to_snowflake(1_000_000_000_000);
+        assert_eq!(snowflake.get(), 1);
     }
 
     // --- should_process_user_message tests (GIVEN/WHEN/THEN) ---
