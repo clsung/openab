@@ -8,9 +8,10 @@ use crate::media;
 use crate::remind::{self, ReminderStore};
 use async_trait::async_trait;
 use serenity::builder::{
-    CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, CreateThread, EditMessage,
+    CreateActionRow, CreateAttachment, CreateButton, CreateCommand, CreateCommandOption,
+    CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditMessage,
+    GetMessages,
 };
 use serenity::http::Http;
 use serenity::model::application::ButtonStyle;
@@ -33,6 +34,9 @@ const PARTICIPATION_CACHE_MAX: usize = 1000;
 
 /// Discord StringSelectMenu hard limit on options.
 const SELECT_MENU_PAGE_SIZE: usize = 25;
+
+/// Avoid unbounded Discord history exports from very large threads.
+const THREAD_EXPORT_MESSAGE_LIMIT: usize = 5000;
 
 // --- DiscordAdapter: implements ChatAdapter for Discord via serenity ---
 
@@ -837,6 +841,8 @@ impl EventHandler for Handler {
                     "delay",
                     "Delay before firing (e.g. 30m, 2h, 1d)",
                 ).required(true)),
+            CreateCommand::new("export-thread")
+                .description("Download this thread as a text file"),
         ];
 
         // Register global commands (works in DMs + all guilds after propagation).
@@ -894,6 +900,9 @@ impl EventHandler for Handler {
             }
             Interaction::Command(cmd) if cmd.data.name == "remind" => {
                 self.handle_remind_command(&ctx, &cmd).await;
+            }
+            Interaction::Command(cmd) if cmd.data.name == "export-thread" => {
+                self.handle_export_thread_command(&ctx, &cmd).await;
             }
             Interaction::Component(comp) if comp.data.custom_id.starts_with("acp_config_") => {
                 self.handle_config_select(&ctx, &comp).await;
@@ -1296,6 +1305,120 @@ impl Handler {
         }
     }
 
+    async fn handle_export_thread_command(
+        &self,
+        ctx: &Context,
+        cmd: &serenity::model::application::CommandInteraction,
+    ) {
+        if is_denied_user(
+            false,
+            self.allow_all_users,
+            &self.allowed_users,
+            cmd.user.id.get(),
+        ) {
+            let response = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("🚫 You are not allowed to use this bot.")
+                    .ephemeral(true),
+            );
+            if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                tracing::error!(error = %e, "failed to deny /export-thread command");
+            }
+            return;
+        }
+
+        let channel_id = cmd.channel_id;
+        let (export_allowed, export_name) = match channel_id.to_channel(&ctx.http).await {
+            Ok(serenity::model::channel::Channel::Guild(gc)) => {
+                let in_allowed_channel =
+                    self.allow_all_channels || self.allowed_channels.contains(&channel_id.get());
+                let (in_thread, _) = detect_thread(
+                    gc.thread_metadata.is_some(),
+                    gc.parent_id.map(|id| id.get()),
+                    gc.owner_id.map(|id| id.get()),
+                    ctx.cache.current_user().id.get(),
+                    &self.allowed_channels,
+                    self.allow_all_channels,
+                    in_allowed_channel,
+                );
+                (in_thread, gc.name.clone())
+            }
+            Ok(serenity::model::channel::Channel::Private(_)) => {
+                (self.allow_dm, "dm".to_string())
+            }
+            Ok(_) => (false, "channel".to_string()),
+            Err(e) => {
+                tracing::warn!(channel_id = %channel_id, error = %e, "failed to inspect channel for export");
+                (false, "channel".to_string())
+            }
+        };
+
+        if !export_allowed {
+            let response = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("⚠️ Run this command inside an allowed Discord thread or DM.")
+                    .ephemeral(true),
+            );
+            if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                tracing::error!(error = %e, "failed to respond to /export-thread rejection");
+            }
+            return;
+        }
+
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content("Preparing thread export...")
+                .ephemeral(true),
+        );
+        if let Err(e) = cmd.create_response(&ctx.http, response).await {
+            tracing::error!(error = %e, "failed to acknowledge /export-thread command");
+            return;
+        }
+
+        match export_channel_messages(
+            &ctx.http,
+            channel_id,
+            &export_name,
+            cmd.attachment_size_limit,
+        )
+        .await
+        {
+            Ok(result) => {
+                let mut content = format!("Exported {} messages.", result.written);
+                if result.hit_cap {
+                    content.push_str(&format!(
+                        " Only the most recent {} messages were fetched — older messages were not included.",
+                        THREAD_EXPORT_MESSAGE_LIMIT
+                    ));
+                }
+                if result.byte_truncated {
+                    content.push_str(&format!(
+                        " Transcript truncated to fit Discord's attachment size limit ({} of {} fetched messages included).",
+                        result.written, result.fetched
+                    ));
+                }
+                let attachment =
+                    CreateAttachment::bytes(result.transcript.into_bytes(), result.filename);
+                let followup = CreateInteractionResponseFollowup::new()
+                    .content(content)
+                    .add_file(attachment)
+                    .ephemeral(true);
+                if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+                    tracing::error!(error = %e, "failed to send /export-thread attachment");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(channel_id = %channel_id, error = %e, "failed to export thread");
+                let followup = CreateInteractionResponseFollowup::new()
+                    .content(format!("⚠️ Failed to export thread: {e}"))
+                    .ephemeral(true);
+                if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+                    tracing::error!(error = %e, "failed to send /export-thread error");
+                }
+            }
+        }
+    }
+
     async fn handle_config_select(
         &self,
         ctx: &Context,
@@ -1409,6 +1532,204 @@ fn discord_msg_ref(msg: &Message) -> MessageRef {
             origin_event_id: None,
         },
         message_id: msg.id.to_string(),
+    }
+}
+
+struct ExportResult {
+    filename: String,
+    transcript: String,
+    /// Messages successfully pulled from Discord.
+    fetched: usize,
+    /// Messages that fit in the transcript (≤ `fetched`; differs when the
+    /// attachment-size limit truncates).
+    written: usize,
+    /// We stopped fetching because we hit `THREAD_EXPORT_MESSAGE_LIMIT` and the
+    /// thread still has older messages we did not include.
+    hit_cap: bool,
+    /// Transcript was cut to keep the attachment under Discord's size limit.
+    byte_truncated: bool,
+}
+
+async fn export_channel_messages(
+    http: &Http,
+    channel_id: ChannelId,
+    channel_name: &str,
+    attachment_size_limit: u32,
+) -> anyhow::Result<ExportResult> {
+    let mut messages = Vec::new();
+    let mut before = None;
+    let mut hit_cap = false;
+
+    loop {
+        if messages.len() >= THREAD_EXPORT_MESSAGE_LIMIT {
+            hit_cap = true;
+            break;
+        }
+        let remaining = THREAD_EXPORT_MESSAGE_LIMIT - messages.len();
+        let limit = remaining.min(100) as u8;
+        let mut request = GetMessages::new().limit(limit);
+        if let Some(before_id) = before {
+            request = request.before(before_id);
+        }
+
+        let batch = channel_id.messages(http, request).await?;
+        if batch.is_empty() {
+            break;
+        }
+
+        before = batch.last().map(|m| m.id);
+        let batch_len = batch.len();
+        messages.extend(batch);
+
+        if batch_len < limit as usize {
+            break;
+        }
+    }
+
+    // If we stopped at the cap, probe one more message to confirm the thread
+    // really has more — avoids a misleading "we left some behind" disclosure
+    // in the exact-multiple-of-cap case. Probe failure is non-fatal.
+    if hit_cap {
+        let probe = GetMessages::new().limit(1);
+        let probe = if let Some(before_id) = before {
+            probe.before(before_id)
+        } else {
+            probe
+        };
+        if matches!(channel_id.messages(http, probe).await, Ok(b) if b.is_empty()) {
+            hit_cap = false;
+        }
+    }
+
+    messages.reverse();
+
+    let filename = export_filename(channel_id, channel_name);
+    let max_bytes = usize::try_from(attachment_size_limit)
+        .unwrap_or(8 * 1024 * 1024)
+        // Reserve ~1 KiB for the transcript header (channel name + ID + counts)
+        // and the optional truncation footer so the final `.txt` stays under
+        // Discord's interaction-attachment size limit. `.max(1024)` keeps us
+        // from accidentally hitting zero on a tiny limit.
+        .saturating_sub(1024)
+        .max(1024);
+    let (transcript, written, byte_truncated) =
+        format_thread_export(channel_id, channel_name, &messages, max_bytes);
+    let fetched = messages.len();
+
+    Ok(ExportResult {
+        filename,
+        transcript,
+        fetched,
+        written,
+        hit_cap,
+        byte_truncated,
+    })
+}
+
+fn format_thread_export(
+    channel_id: ChannelId,
+    channel_name: &str,
+    messages: &[Message],
+    max_bytes: usize,
+) -> (String, usize, bool) {
+    let header = format!(
+        "Discord thread export\nChannel: {channel_name} ({channel_id})\nMessages: {}\n\n",
+        messages.len()
+    );
+    let entries: Vec<String> = messages.iter().map(format_export_message).collect();
+    assemble_export(&header, &entries, max_bytes)
+}
+
+/// Build the transcript body from a pre-rendered header and a list of
+/// already-formatted message entries, honouring `max_bytes`.
+///
+/// Returns `(transcript, written, truncated)` where `written` is the number of
+/// entries actually included. Split out from `format_thread_export` so the
+/// truncation boundary logic can be unit-tested without constructing real
+/// `serenity::model::channel::Message` values.
+fn assemble_export(header: &str, entries: &[String], max_bytes: usize) -> (String, usize, bool) {
+    let mut out = String::from(header);
+    let mut written = 0;
+    let mut truncated = false;
+
+    for entry in entries {
+        if out.len() + entry.len() > max_bytes {
+            truncated = true;
+            break;
+        }
+        out.push_str(entry);
+        written += 1;
+    }
+
+    if truncated {
+        let note = "\n[Export truncated to fit Discord attachment size limit]\n";
+        let room = max_bytes.saturating_sub(out.len());
+        if room >= note.len() {
+            out.push_str(note);
+        }
+    }
+
+    (out, written, truncated)
+}
+
+fn format_export_message(msg: &Message) -> String {
+    let bot_marker = if msg.author.bot { " [bot]" } else { "" };
+    let mut out = format!(
+        "[{}] {}{} ({})\n",
+        msg.timestamp,
+        msg.author.name,
+        bot_marker,
+        msg.author.id
+    );
+
+    if msg.content.is_empty() {
+        out.push_str("(no text)\n");
+    } else {
+        out.push_str(&msg.content);
+        out.push('\n');
+    }
+
+    for attachment in &msg.attachments {
+        let mime = attachment.content_type.as_deref().unwrap_or("unknown");
+        out.push_str(&format!(
+            "[attachment] {} ({} bytes, {}): {}\n",
+            attachment.filename, attachment.size, mime, attachment.url
+        ));
+    }
+
+    out.push('\n');
+    out
+}
+
+fn export_filename(channel_id: ChannelId, channel_name: &str) -> String {
+    let safe_name = sanitize_filename_component(channel_name);
+    format!("discord-thread-{safe_name}-{channel_id}.txt")
+}
+
+/// Reduce a free-form Discord channel/thread name to a safe ASCII filename
+/// fragment.
+///
+/// Non-ASCII characters are dropped silently — a purely-Chinese thread name
+/// like "扈三娘的房間" becomes `"thread"`. That's intentional: the caller
+/// appends the channel ID, which already guarantees uniqueness, and an ASCII
+/// fragment plays nicer with downstream tools (mail attachments, S3 keys,
+/// browser save-as dialogs). The 64-byte cap leaves room for the
+/// `discord-thread-` prefix and the channel-ID suffix within typical
+/// filesystem limits.
+fn sanitize_filename_component(input: &str) -> String {
+    let mut safe = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            safe.push(ch);
+        } else if ch.is_whitespace() || matches!(ch, '.' | '/') {
+            safe.push('-');
+        }
+    }
+    let safe = safe.trim_matches('-');
+    if safe.is_empty() {
+        "thread".to_string()
+    } else {
+        safe.chars().take(64).collect()
     }
 }
 
@@ -1775,6 +2096,77 @@ mod tests {
         assert!(!is_thread_already_exists_error(&err));
         let err = anyhow::anyhow!("rate limit exceeded");
         assert!(!is_thread_already_exists_error(&err));
+    }
+
+    // --- thread export helpers ---
+
+    #[test]
+    fn sanitize_filename_component_keeps_safe_ascii() {
+        assert_eq!(
+            sanitize_filename_component("release notes_v2"),
+            "release-notes_v2"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_component_falls_back_for_empty_result() {
+        assert_eq!(sanitize_filename_component("///..."), "thread");
+    }
+
+    // --- assemble_export ---
+    // Split out from format_thread_export so we can test the truncation
+    // boundary without constructing serenity::model::channel::Message values.
+
+    #[test]
+    fn assemble_export_empty_entries_returns_header_only() {
+        let (out, written, truncated) = assemble_export("HDR\n", &[], 1024);
+        assert_eq!(out, "HDR\n");
+        assert_eq!(written, 0);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn assemble_export_single_oversized_entry_writes_zero_and_marks_truncated() {
+        let entries = vec!["x".repeat(200)];
+        let (out, written, truncated) = assemble_export("h\n", &entries, 50);
+        assert_eq!(written, 0);
+        assert!(truncated);
+        // Footer needs ~56 bytes; max_bytes 50 leaves ≤48 of room, so it is
+        // intentionally omitted (it can't be appended without exceeding the
+        // limit). The header is still present.
+        assert!(out.starts_with("h\n"));
+        assert!(!out.contains("xx"));
+    }
+
+    #[test]
+    fn assemble_export_entry_at_exact_boundary_is_included() {
+        // header(2) + entry(3) == max_bytes(5); the strict-greater check
+        // keeps the entry in.
+        let (out, written, truncated) = assemble_export("h\n", &["abc".to_string()], 5);
+        assert_eq!(written, 1);
+        assert!(!truncated);
+        assert_eq!(out, "h\nabc");
+    }
+
+    #[test]
+    fn assemble_export_entry_one_byte_over_boundary_is_excluded() {
+        // header(2) + entry(4) == 6 > max_bytes(5); entry is dropped.
+        let (out, written, truncated) = assemble_export("h\n", &["abcd".to_string()], 5);
+        assert_eq!(written, 0);
+        assert!(truncated);
+        assert!(out.starts_with("h\n"));
+        assert!(!out.contains("abcd"));
+    }
+
+    #[test]
+    fn assemble_export_appends_footer_when_room_remains() {
+        // First two short entries fit; the long third entry would overflow,
+        // and the remaining headroom is enough for the truncation footer.
+        let entries = vec!["a\n".to_string(), "b\n".to_string(), "c".repeat(500)];
+        let (out, written, truncated) = assemble_export("h\n", &entries, 200);
+        assert_eq!(written, 2);
+        assert!(truncated);
+        assert!(out.contains("[Export truncated"));
     }
 
     // --- should_process_user_message tests (GIVEN/WHEN/THEN) ---
