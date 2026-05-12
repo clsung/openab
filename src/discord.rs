@@ -1465,7 +1465,7 @@ impl Handler {
                 if result.hit_cap {
                     content.push_str(&format!(
                         " Only the most recent {} messages were fetched — older messages were not included.",
-                        THREAD_EXPORT_MESSAGE_LIMIT
+                        result.fetched
                     ));
                 }
                 if result.byte_truncated {
