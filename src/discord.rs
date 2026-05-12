@@ -1560,6 +1560,8 @@ async fn export_channel_messages(
     let mut before = None;
     let mut hit_cap = false;
 
+    // Fetches newest-first using `before` pagination, then reverses at the end.
+    // The hit_cap disclosure ("most recent N messages") relies on this direction.
     loop {
         if messages.len() >= THREAD_EXPORT_MESSAGE_LIMIT {
             hit_cap = true;
@@ -1604,6 +1606,9 @@ async fn export_channel_messages(
     messages.reverse();
 
     let filename = export_filename(channel_id, channel_name);
+    if attachment_size_limit < 2048 {
+        tracing::warn!(attachment_size_limit, "attachment_size_limit is very small; export will likely be truncated");
+    }
     let max_bytes = usize::try_from(attachment_size_limit)
         .unwrap_or(8 * 1024 * 1024)
         // Reserve ~1 KiB for the transcript header (channel name + ID + counts)
@@ -1710,10 +1715,10 @@ fn export_filename(channel_id: ChannelId, channel_name: &str) -> String {
 /// fragment.
 ///
 /// Non-ASCII characters are dropped silently — a purely-Chinese thread name
-/// like "扈三娘的房間" becomes `"thread"`. That's intentional: the caller
-/// appends the channel ID, which already guarantees uniqueness, and an ASCII
-/// fragment plays nicer with downstream tools (mail attachments, S3 keys,
-/// browser save-as dialogs). The 64-byte cap leaves room for the
+/// like "扈三娘的房間" yields a date-based fallback (e.g. `"20260512"`).
+/// The caller appends the channel ID, which already guarantees uniqueness,
+/// and an ASCII fragment plays nicer with downstream tools (mail attachments,
+/// S3 keys, browser save-as dialogs). The 64-byte cap leaves room for the
 /// `discord-thread-` prefix and the channel-ID suffix within typical
 /// filesystem limits.
 fn sanitize_filename_component(input: &str) -> String {
@@ -1727,7 +1732,9 @@ fn sanitize_filename_component(input: &str) -> String {
     }
     let safe = safe.trim_matches('-');
     if safe.is_empty() {
-        "thread".to_string()
+        // Use current date as a human-friendly fallback when the thread name
+        // is entirely non-ASCII.
+        chrono::Utc::now().format("%Y%m%d").to_string()
     } else {
         safe.chars().take(64).collect()
     }
@@ -2110,7 +2117,10 @@ mod tests {
 
     #[test]
     fn sanitize_filename_component_falls_back_for_empty_result() {
-        assert_eq!(sanitize_filename_component("///..."), "thread");
+        let result = sanitize_filename_component("///...");
+        // Fallback is a YYYYMMDD date string
+        assert_eq!(result.len(), 8);
+        assert!(result.chars().all(|c| c.is_ascii_digit()));
     }
 
     // --- assemble_export ---
