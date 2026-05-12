@@ -1633,7 +1633,7 @@ enum ExportFilter {
     All,
     /// Fetch the most recent N messages (newest-first via `before`).
     Limit(usize),
-    /// Fetch messages after a synthetic snowflake (oldest-first via `after`).
+    /// Fetch messages after a synthetic snowflake (newest-first via `before`, with boundary filtering).
     After(MessageId),
 }
 
@@ -1704,8 +1704,10 @@ async fn export_channel_messages(
             messages.reverse();
         }
         ExportFilter::After(after_id) => {
-            // Fetch oldest-first using `after` pagination (already chronological).
-            let mut after = *after_id;
+            // Fetch newest-first using `before` pagination, stop when we hit
+            // messages at or before the filter boundary. This ensures that when
+            // the cap is reached, we keep the *newest* messages in the window.
+            let mut before = None;
             loop {
                 if messages.len() >= cap {
                     hit_cap = true;
@@ -1713,27 +1715,49 @@ async fn export_channel_messages(
                 }
                 let remaining = cap - messages.len();
                 let limit = remaining.min(100) as u8;
-                let request = GetMessages::new().limit(limit).after(after);
+                let mut request = GetMessages::new().limit(limit);
+                if let Some(before_id) = before {
+                    request = request.before(before_id);
+                }
                 let batch = channel_id.messages(http, request).await?;
                 if batch.is_empty() {
                     break;
                 }
-                // Discord returns newest-first even with `after`, so sort ascending.
-                let mut batch = batch;
-                batch.sort_by_key(|m| m.id);
-                after = batch.last().unwrap().id;
+                before = batch.last().map(|m| m.id);
                 let batch_len = batch.len();
-                messages.extend(batch);
+                // Filter out messages at or before the boundary.
+                let filtered: Vec<_> = batch.into_iter().filter(|m| m.id > *after_id).collect();
+                let hit_boundary = filtered.len() < batch_len;
+                messages.extend(filtered);
+                if hit_boundary {
+                    // We've reached the time boundary; no need to fetch older.
+                    break;
+                }
                 if batch_len < limit as usize {
                     break;
                 }
             }
+            // Probe only if we stopped due to cap (not boundary).
             if hit_cap {
-                let probe = GetMessages::new().limit(1).after(after);
-                if matches!(channel_id.messages(http, probe).await, Ok(b) if b.is_empty()) {
-                    hit_cap = false;
+                let probe = GetMessages::new().limit(1);
+                let probe = if let Some(before_id) = before {
+                    probe.before(before_id)
+                } else {
+                    probe
+                };
+                match channel_id.messages(http, probe).await {
+                    Ok(batch) => {
+                        // If the next message is beyond our filter boundary,
+                        // we didn't actually leave relevant messages behind.
+                        let has_more_in_window = batch.iter().any(|m| m.id > *after_id);
+                        if !has_more_in_window {
+                            hit_cap = false;
+                        }
+                    }
+                    Err(_) => {} // probe failure is non-fatal
                 }
             }
+            messages.reverse();
         }
     }
 
