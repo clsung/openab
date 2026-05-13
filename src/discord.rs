@@ -851,7 +851,7 @@ impl EventHandler for Handler {
                 .add_option(CreateCommandOption::new(
                     CommandOptionType::String,
                     "since",
-                    "Export messages after this date (YYYY-MM-DD, UTC)",
+                    "Export messages after this message ID",
                 ))
                 .add_option(CreateCommandOption::new(
                     CommandOptionType::Integer,
@@ -1408,16 +1408,13 @@ impl Handler {
                 return;
             }
             ExportFilter::Limit(n as usize)
-        } else if let Some(date_str) = since_opt {
-            match chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                Ok(date) => {
-                    let ts_ms = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as u64;
-                    ExportFilter::After(timestamp_ms_to_snowflake(ts_ms))
-                }
-                Err(_) => {
+        } else if let Some(id_str) = since_opt {
+            match id_str.parse::<u64>() {
+                Ok(id) if id > 0 => ExportFilter::After(MessageId::new(id)),
+                _ => {
                     let response = CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
-                            .content("⚠️ `since` must be a valid date in YYYY-MM-DD format (UTC).")
+                            .content("⚠️ `since` must be a valid message ID (right-click a message → Copy Message ID).")
                             .ephemeral(true),
                     );
                     let _ = cmd.create_response(&ctx.http, response).await;
