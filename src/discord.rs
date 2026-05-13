@@ -857,6 +857,11 @@ impl EventHandler for Handler {
                     CommandOptionType::Integer,
                     "days",
                     "Export messages from the last N days (1–365)",
+                ))
+                .add_option(CreateCommandOption::new(
+                    CommandOptionType::Boolean,
+                    "all",
+                    "Export all messages (up to 5000). Default is last 100.",
                 )),
         ];
 
@@ -1385,19 +1390,22 @@ impl Handler {
         let limit_opt = opts.iter().find(|o| o.name == "limit").and_then(|o| o.value.as_i64());
         let since_opt = opts.iter().find(|o| o.name == "since").and_then(|o| o.value.as_str());
         let days_opt = opts.iter().find(|o| o.name == "days").and_then(|o| o.value.as_i64());
+        let all_opt = opts.iter().find(|o| o.name == "all").and_then(|o| o.value.as_bool()).unwrap_or(false);
 
-        let filter_count = limit_opt.is_some() as u8 + since_opt.is_some() as u8 + days_opt.is_some() as u8;
+        let filter_count = limit_opt.is_some() as u8 + since_opt.is_some() as u8 + days_opt.is_some() as u8 + all_opt as u8;
         if filter_count > 1 {
             let response = CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
-                    .content("⚠️ Please specify only one filter: `limit`, `since`, or `days`.")
+                    .content("⚠️ Please specify only one filter: `limit`, `since`, `days`, or `all`.")
                     .ephemeral(true),
             );
             let _ = cmd.create_response(&ctx.http, response).await;
             return;
         }
 
-        let filter = if let Some(n) = limit_opt {
+        let filter = if all_opt {
+            ExportFilter::All
+        } else if let Some(n) = limit_opt {
             if !(1..=5000).contains(&n) {
                 let response = CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new()
@@ -1435,7 +1443,8 @@ impl Handler {
             let ts_ms = since_ts.timestamp_millis() as u64;
             ExportFilter::After(timestamp_ms_to_snowflake(ts_ms))
         } else {
-            ExportFilter::All
+            // Default: export last 100 messages (use limit:N or all:true for more)
+            ExportFilter::Limit(100)
         };
 
         let response = CreateInteractionResponse::Message(

@@ -76,15 +76,17 @@ Fetches the current Discord thread or DM history and returns a `.txt` file as an
 | `limit` | Integer | Export only the most recent N messages (1–5000) |
 | `since` | String | Export messages after this message ID (right-click → Copy Message ID) |
 | `days` | Integer | Export messages from the last N days (1–365) |
+| `all` | Boolean | Export all messages (up to 5000) |
 
-If no parameter is provided, all messages are exported (capped at 5000).
+If no parameter is provided, the **last 100 messages** are exported.
 
 **Examples:**
 ```
-/export-thread                              → export all (cap 5000)
-/export-thread limit:100                    → most recent 100 messages
+/export-thread                              → last 100 messages (default)
+/export-thread limit:500                    → most recent 500 messages
 /export-thread since:1503744866100842698    → messages after this specific message
 /export-thread days:3                       → messages from the last 3 days
+/export-thread all:true                     → export all (cap 5000)
 ```
 
 **Constraints:**
