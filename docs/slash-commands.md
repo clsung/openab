@@ -11,7 +11,7 @@ OpenAB registers Discord slash commands for session control. These work in both 
 | `/cancel` | Cancel the current in-flight operation | Yes |
 | `/reset` | Reset the conversation session (clear history, start fresh) | Yes |
 | `/remind` | Set a one-shot delayed reminder to mention users/roles | No |
-| `/export-thread` | Download the current Discord thread as a `.txt` transcript | No |
+| `/export-thread` | Export thread/DM as `.txt` (default: last 100 messages) | No |
 
 All responses are **ephemeral** — only the user who invoked the command sees the reply.
 
@@ -85,7 +85,7 @@ If no parameter is provided, the **last 100 messages** are exported.
 /export-thread                              → last 100 messages (default)
 /export-thread limit:500                    → most recent 500 messages
 /export-thread since:1503744866100842698    → messages after this specific message
-/export-thread days:3                       → messages from the last 3 days
+/export-thread days:3                       → messages from the last 3 days (rolling 72h)
 /export-thread all:true                     → export all (cap 5000)
 ```
 

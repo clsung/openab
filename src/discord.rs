@@ -2362,6 +2362,50 @@ mod tests {
         assert_eq!(snowflake.get(), 1);
     }
 
+    // --- ExportFilter cap logic ---
+
+    #[test]
+    fn export_filter_default_cap_is_100() {
+        // Default (no params) uses Limit(100)
+        let filter = ExportFilter::Limit(100);
+        let cap = match &filter {
+            ExportFilter::Limit(n) => *n,
+            _ => THREAD_EXPORT_MESSAGE_LIMIT,
+        };
+        assert_eq!(cap, 100);
+    }
+
+    #[test]
+    fn export_filter_all_cap_is_5000() {
+        let filter = ExportFilter::All;
+        let cap = match &filter {
+            ExportFilter::Limit(n) => *n,
+            _ => THREAD_EXPORT_MESSAGE_LIMIT,
+        };
+        assert_eq!(cap, THREAD_EXPORT_MESSAGE_LIMIT);
+        assert_eq!(cap, 5000);
+    }
+
+    #[test]
+    fn export_filter_limit_uses_custom_cap() {
+        let filter = ExportFilter::Limit(250);
+        let cap = match &filter {
+            ExportFilter::Limit(n) => *n,
+            _ => THREAD_EXPORT_MESSAGE_LIMIT,
+        };
+        assert_eq!(cap, 250);
+    }
+
+    #[test]
+    fn export_filter_after_uses_global_cap() {
+        let filter = ExportFilter::After(MessageId::new(123456789));
+        let cap = match &filter {
+            ExportFilter::Limit(n) => *n,
+            _ => THREAD_EXPORT_MESSAGE_LIMIT,
+        };
+        assert_eq!(cap, THREAD_EXPORT_MESSAGE_LIMIT);
+    }
+
     // --- should_process_user_message tests (GIVEN/WHEN/THEN) ---
     // Tests the multibot-mentions gating logic extracted from EventHandler::message.
     // The bug in #481 was that other bots' messages were filtered by bot gating
