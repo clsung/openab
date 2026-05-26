@@ -239,6 +239,20 @@ impl Adapter {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+
+        // Restore evicted session from state file if needed
+        if !session_id.is_empty() && !self.sessions.contains_key(session_id) {
+            if let Some(conv_id) = self.restore_session(session_id) {
+                self.sessions.insert(
+                    session_id.to_string(),
+                    Session {
+                        conversation_id: Some(conv_id),
+                        prev_output: String::new(),
+                    },
+                );
+            }
+        }
+
         let prompt_text = params
             .get("prompt")
             .and_then(|v| v.as_array())
