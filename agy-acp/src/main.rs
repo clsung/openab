@@ -191,6 +191,7 @@ impl Adapter {
         let Some(conversation_id) = self.restore_session(session_id) else {
             return false;
         };
+        // Evict only after confirming the restore target exists
         if !self.sessions.contains_key(session_id) {
             self.evict_if_needed();
         }
@@ -255,7 +256,7 @@ impl Adapter {
             return JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
-                result: Some(json!({})),
+                result: Some(json!({ "sessionId": session_id })),
                 error: None,
             };
         }
@@ -559,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // filesystem I/O — run with CHI_INTEG=1
     fn test_session_load_restores_persisted_session() {
         let root = std::env::temp_dir().join(format!("agy-acp-load-{}", Uuid::new_v4()));
         let _ = fs::create_dir_all(&root);
@@ -592,6 +594,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // filesystem I/O — run with CHI_INTEG=1
     fn test_session_load_rejects_unknown_session() {
         let root = std::env::temp_dir().join(format!("agy-acp-missing-{}", Uuid::new_v4()));
         let _ = fs::create_dir_all(&root);
