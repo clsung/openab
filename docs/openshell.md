@@ -42,12 +42,13 @@ openshell sandbox create --name oab \
 At this point you are **inside the sandbox** (prompt changes). To return to the host, type `exit`. To reconnect later: `openshell sandbox connect oab`.
 
 ```bash
-# 3. (Inside sandbox) Clone and build OAB
-sandbox$ git clone https://github.com/openabdev/openab.git
-sandbox$ cd openab
-sandbox$ cargo build --release
+# 3. (Inside sandbox) Download and install OAB
+sandbox$ curl -LO https://github.com/openabdev/openab/releases/latest/download/openab-linux-x64.tar.gz
+sandbox$ tar xzf openab-linux-x64.tar.gz
+sandbox$ chmod +x openab
 
 # 4. (Inside sandbox) Create config.toml
+sandbox$ curl -LO https://raw.githubusercontent.com/openabdev/openab/main/config.toml.example
 sandbox$ cp config.toml.example config.toml
 sandbox$ sed -i 's/allowed_channels = \["1234567890"\]/allowed_channels = ["YOUR_CHANNEL_ID"]/' config.toml
 ```
@@ -56,7 +57,7 @@ Edit `config.toml` to set your Discord channel ID. The env vars (`DISCORD_BOT_TO
 
 ```bash
 # 5. (Inside sandbox) Run OAB
-sandbox$ ./target/release/openab serve --config config.toml
+sandbox$ ./openab serve --config config.toml
 ```
 
 ### Applying network policy (from a separate host terminal)
@@ -119,19 +120,17 @@ RUN groupadd -g 1000660000 sandbox && \
     useradd -u 1000660000 -g sandbox -m sandbox
 
 RUN apt-get update && apt-get install -y \
-    curl git iproute2 ca-certificates build-essential && \
+    curl git iproute2 ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    su sandbox -c 'sh -s -- -y'
+# Download pre-built OAB binary
+RUN curl -L https://github.com/openabdev/openab/releases/latest/download/openab-linux-x64.tar.gz | \
+    tar xz -C /usr/local/bin/
 
 USER sandbox
 WORKDIR /home/sandbox
-RUN . /home/sandbox/.cargo/env && \
-    git clone https://github.com/openabdev/openab.git && \
-    cd openab && cargo build --release
-
-WORKDIR /home/sandbox/openab
+RUN curl -LO https://raw.githubusercontent.com/openabdev/openab/main/config.toml.example && \
+    cp config.toml.example config.toml
 ```
 
 Run it:
@@ -149,12 +148,11 @@ openshell policy set oab --policy /tmp/oab-policy.yaml --wait
 openshell sandbox connect oab
 ```
 
-Inside the sandbox, OAB is already built:
+Inside the sandbox, OAB is already installed:
 
 ```bash
-sandbox$ cp config.toml.example config.toml
-# Edit config.toml with your channel ID
-sandbox$ ./target/release/openab serve --config config.toml
+sandbox$ sed -i 's/allowed_channels = \["1234567890"\]/allowed_channels = ["YOUR_CHANNEL_ID"]/' config.toml
+sandbox$ openab serve --config config.toml
 ```
 
 ## Cleanup
