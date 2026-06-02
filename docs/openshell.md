@@ -4,87 +4,124 @@ Run OAB inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbo
 
 ## Prerequisites
 
-- Docker running on the host
+- Docker running on the host (user must be in the `docker` group)
 - [OpenShell CLI](https://github.com/NVIDIA/OpenShell#install) installed
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
 ```
 
+> **Note:** The installer starts `openshell-gateway` as a systemd user service. If the gateway fails with "failed to query Docker daemon version", add your user to the `docker` group and restart the session:
+> ```bash
+> sudo usermod -aG docker $USER
+> # Log out and back in (or: loginctl terminate-user $USER)
+> ```
+
 ## Quick Start (Local Docker)
 
-The following is a single copy-pasteable sequence. All commands run **on the host** unless prefixed with `sandbox$`.
+All commands run **on the host** unless prefixed with `sandbox$`.
+
+### 1. Create credential provider
 
 ```bash
-# 1. Create credential providers
-#    Providers are stored in the OpenShell gateway's local state.
-#    Host env vars are read only at creation time and not retained.
-#    Providers persist until explicitly removed with `openshell provider delete <name>`.
 export DISCORD_BOT_TOKEN="your-token"
-export GITHUB_TOKEN="your-token"
-export ANTHROPIC_API_KEY="your-key"
 
-openshell provider create --name discord --env DISCORD_BOT_TOKEN
-openshell provider create --name github --env GITHUB_TOKEN
-openshell provider create --name anthropic --env ANTHROPIC_API_KEY
+openshell provider create --name discord --type generic \
+  --credential "DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}"
+```
 
-# 2. Create sandbox with providers and port forwarding
-#    This starts an isolated container and drops you into a bash shell inside it.
-#    The sandbox runs until you `exit` or delete it from the host.
+### 2. Create sandbox
+
+```bash
 openshell sandbox create --name oab \
   --provider discord \
-  --provider github \
-  --provider anthropic \
-  --forward 3000 \
   -- bash
 ```
 
 At this point you are **inside the sandbox** (prompt changes). To return to the host, type `exit`. To reconnect later: `openshell sandbox connect oab`.
 
-```bash
-# 3. (Inside sandbox) Download and install OAB
-sandbox$ TAG=$(curl -sI https://github.com/openabdev/openab/releases/latest | grep -i location | sed 's|.*/||' | tr -d '\r')
-sandbox$ curl -LO "https://github.com/openabdev/openab/releases/download/${TAG}/${TAG}-linux-x64.tar.gz"
-sandbox$ tar xzf ${TAG}-linux-x64.tar.gz
-sandbox$ chmod +x openab
+### 3. Install OAB + Native Agent (from host)
 
-# 4. (Inside sandbox) Create config.toml
-sandbox$ curl -LO https://raw.githubusercontent.com/openabdev/openab/main/config.toml.example
-sandbox$ cp config.toml.example config.toml
-sandbox$ sed -i 's/allowed_channels = \["1234567890"\]/allowed_channels = ["YOUR_CHANNEL_ID"]/' config.toml
+The sandbox has **default-deny egress**, so download binaries on the host and copy them in:
+
+```bash
+# On the host (separate terminal)
+TAG=$(curl -sI https://github.com/openabdev/openab/releases/latest | grep -i location | sed 's|.*/||' | tr -d '\r')
+
+# Download OAB
+curl -LO "https://github.com/openabdev/openab/releases/download/${TAG}/${TAG}-linux-x64.tar.gz"
+tar xzf ${TAG}-linux-x64.tar.gz
+
+# Extract openab-agent from the native image
+docker pull ghcr.io/openabdev/openab-native:beta
+CID=$(docker create ghcr.io/openabdev/openab-native:beta)
+docker cp $CID:/usr/local/bin/openab-agent ./openab-agent
+docker rm $CID
+
+# Copy into sandbox
+CONTAINER=$(docker ps --filter name=openshell-oab -q)
+docker cp openab $CONTAINER:/sandbox/
+docker cp openab-agent $CONTAINER:/sandbox/
+docker exec $CONTAINER chmod +x /sandbox/openab /sandbox/openab-agent
 ```
 
-Edit `config.toml` to set your Discord channel ID. The env vars (`DISCORD_BOT_TOKEN`, etc.) are already injected by the provider — no need to set them manually.
+### 4. Authenticate openab-agent (codex OAuth — headless)
 
 ```bash
-# 5. (Inside sandbox) Run OAB
-sandbox$ ./openab serve --config config.toml
+# On the host
+docker exec -it $CONTAINER /sandbox/openab-agent auth codex-oauth --no-browser
 ```
 
-### Applying network policy (from a separate host terminal)
+This prints an authorization URL. Open it in your browser, approve, then paste the `localhost:1455/auth/callback?...` URL back into the terminal.
 
-Open a new terminal on the host while OAB is running:
+### 5. Create config.toml
 
 ```bash
-# All unlisted egress is denied by default.
-cat > /tmp/oab-policy.yaml <<'EOF'
-network:
-  egress:
-    - destination: "discord.com"
-      ports: [443]
-    - destination: "gateway.discord.gg"
-      ports: [443]
-    - destination: "api.github.com"
-      ports: [443]
-    - destination: "github.com"
-      ports: [443]
-    - destination: "api.anthropic.com"
-      ports: [443]
+cat > /tmp/oab-config.toml <<'EOF'
+[discord]
+bot_token = "${DISCORD_BOT_TOKEN}"
+allow_all_channels = true
+
+[agent]
+command = "/sandbox/openab-agent"
+working_dir = "/sandbox"
+env = { OPENAB_AGENT_OPENAI_MODEL = "gpt-5.4-mini" }
+
+[pool]
+max_sessions = 3
+session_ttl_hours = 1
+
+[reactions]
+enabled = true
 EOF
-openshell policy set oab --policy /tmp/oab-policy.yaml --wait
+docker cp /tmp/oab-config.toml $CONTAINER:/sandbox/config.toml
 ```
 
-> **DNS note:** OpenShell resolves hostnames in `destination` via the sandbox's DNS at policy evaluation time. Wildcard subdomains (e.g., `*.discord.com`) are not supported — list each hostname explicitly. If a service uses multiple domains, check its docs for the full list.
+> **Note:** The `${DISCORD_BOT_TOKEN}` env var expansion works only if the raw token is available in the sandbox environment. If using OpenShell providers (which inject reference tokens), hardcode the bot token directly in the config instead.
+
+### 6. Set network policy
+
+```bash
+openshell policy update oab \
+  --add-endpoint "discord.com:443:read-write:rest:enforce" \
+  --add-endpoint "gateway.discord.gg:443:read-write:websocket:enforce" \
+  --add-endpoint "cdn.discordapp.com:443:read-write:rest:enforce" \
+  --add-endpoint "chatgpt.com:443:read-write:rest:enforce" \
+  --add-endpoint "auth0.openai.com:443:read-write:rest:enforce"
+```
+
+### 7. Run OAB
+
+```bash
+# Inside sandbox (openshell sandbox connect oab)
+sandbox$ cd /sandbox && ./openab run --config config.toml
+```
+
+Or from the host:
+
+```bash
+docker exec -d $CONTAINER bash -c "cd /sandbox && ./openab run --config config.toml"
+```
 
 ## Credential Management
 
@@ -94,11 +131,34 @@ openshell policy set oab --policy /tmp/oab-policy.yaml --wait
 | Delete a provider | `openshell provider delete discord` |
 | Rotate a credential | Delete + recreate with new value |
 
-Credentials are injected as env vars at sandbox runtime. They are **not** written to the sandbox filesystem. Removing a provider immediately revokes access on the next sandbox restart.
+Providers use `--type generic --credential KEY=VALUE` format. Credentials are injected as env vars at sandbox runtime.
+
+## Network Policy
+
+OpenShell sandboxes have **default-deny egress**. Use `openshell policy update` to allow specific endpoints:
+
+```bash
+# Add an endpoint
+openshell policy update oab --add-endpoint "api.example.com:443:read-write:rest:enforce"
+
+# View current policy
+openshell policy get oab
+```
+
+Endpoint format: `host:port:access:protocol:mode`
+
+### Required endpoints by agent backend
+
+| Backend | Endpoints |
+|---------|-----------|
+| All | `discord.com:443`, `gateway.discord.gg:443`, `cdn.discordapp.com:443` |
+| Native Agent (codex) | `chatgpt.com:443`, `auth0.openai.com:443` |
+| Native Agent (anthropic) | `api.anthropic.com:443` |
+| GitHub access | `api.github.com:443`, `github.com:443` |
 
 ## Port Forwarding
 
-Add `--forward <port>` at sandbox creation. Multiple ports are supported:
+Add `--forward <port>` at sandbox creation:
 
 ```bash
 openshell sandbox create --name oab \
@@ -108,7 +168,7 @@ openshell sandbox create --name oab \
   -- bash
 ```
 
-Each forwarded port creates an SSH tunnel: `localhost:<port>` on the host → `127.0.0.1:<port>` inside the sandbox. Tunnels are torn down when the sandbox is deleted.
+Each forwarded port creates a tunnel: `localhost:<port>` on the host → `127.0.0.1:<port>` inside the sandbox.
 
 ## BYOC (Custom Image)
 
@@ -121,18 +181,15 @@ RUN groupadd -g 1000660000 sandbox && \
     useradd -u 1000660000 -g sandbox -m sandbox
 
 RUN apt-get update && apt-get install -y \
-    curl git iproute2 ca-certificates && \
+    curl git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Download pre-built OAB binary
 ARG OAB_VERSION=openab-0.8.4-beta.10
 RUN curl -L "https://github.com/openabdev/openab/releases/download/${OAB_VERSION}/${OAB_VERSION}-linux-x64.tar.gz" | \
     tar xz -C /usr/local/bin/
 
 USER sandbox
 WORKDIR /home/sandbox
-RUN curl -LO https://raw.githubusercontent.com/openabdev/openab/main/config.toml.example && \
-    cp config.toml.example config.toml
 ```
 
 Run it:
@@ -141,28 +198,12 @@ Run it:
 openshell sandbox create --name oab \
   --from ./Dockerfile \
   --provider discord \
-  --provider github \
-  --provider anthropic \
-  --forward 3000 \
   -- bash
-
-openshell policy set oab --policy /tmp/oab-policy.yaml --wait
-openshell sandbox connect oab
-```
-
-Inside the sandbox, OAB is already installed:
-
-```bash
-sandbox$ sed -i 's/allowed_channels = \["1234567890"\]/allowed_channels = ["YOUR_CHANNEL_ID"]/' config.toml
-sandbox$ openab serve --config config.toml
 ```
 
 ## Cleanup
 
 ```bash
 openshell sandbox delete oab
-# Optionally remove providers
 openshell provider delete discord
-openshell provider delete github
-openshell provider delete anthropic
 ```
