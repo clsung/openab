@@ -195,7 +195,7 @@ investigate the build failure
 
 **Why `/new`:**
 - Short, intuitive — matches "new session/thread" mental model
-- Platform autocomplete provides discoverability
+- **Typed arguments with platform UI** — autocomplete for workspaces, dropdown for models, validation before submit. Users don't need to memorize exact model names or path syntax
 - Does not conflict with other bots' commands
 - Naturally implies "session start" — aligns with first-message-only rule
 
