@@ -1,0 +1,58 @@
+name: "E2E: agy-acp"
+
+on:
+  pull_request:
+    paths:
+      - "agy-acp/**"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  AGY_VERSION: "1.0.4"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agy-acp/target
+          key: agy-acp-${{ runner.os }}-${{ hashFiles('agy-acp/Cargo.lock') }}
+
+      - name: Build
+        working-directory: agy-acp
+        run: cargo build --release
+
+      - name: Install agy CLI
+        run: |
+          gh release download "$AGY_VERSION" \
+            --repo google-antigravity/antigravity-cli \
+            --pattern "agy_cli_linux_x64.tar.gz" \
+            --dir /tmp
+          tar -xzf /tmp/agy_cli_linux_x64.tar.gz -C /usr/local/bin/
+          ln -sf /usr/local/bin/antigravity /usr/local/bin/agy
+          agy --version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Prepare auth seed
+        run: |
+          curl -fsSL -o /tmp/agy-auth.tar.gz "$AGY_AUTH_URL"
+          tar -xzf /tmp/agy-auth.tar.gz -C "$HOME"
+          rm -f /tmp/agy-auth.tar.gz
+        env:
+          AGY_AUTH_URL: ${{ secrets.AGY_AUTH_URL }}
+
+      - name: Run E2E test
+        working-directory: agy-acp
+        run: cargo test e2e -- --ignored --nocapture

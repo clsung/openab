@@ -167,8 +167,15 @@ impl Adapter {
         Some(created.remove(0).clone())
     }
 
-    /// Extract text from a protobuf blob by reading field 8 (tag 0x42 = field 8, wire type 2).
+    /// Extract text from a step_payload protobuf: top-level field 20 (sub-message) → field 1 (string).
     fn extract_text_from_step_payload(blob: &[u8]) -> Option<String> {
+        let field_20 = Self::get_proto_field(blob, 20)?;
+        let field_1 = Self::get_proto_field(&field_20, 1)?;
+        String::from_utf8(field_1).ok()
+    }
+
+    /// Extract the first length-delimited field with the given number from a protobuf blob.
+    fn get_proto_field(blob: &[u8], target: u64) -> Option<Vec<u8>> {
         let mut i = 0;
         while i < blob.len() {
             let (tag, consumed) = Self::read_varint(&blob[i..])?;
@@ -176,19 +183,14 @@ impl Adapter {
             let field_number = tag >> 3;
             let wire_type = tag & 0x7;
             match wire_type {
-                0 => {
-                    let (_, c) = Self::read_varint(&blob[i..])?;
-                    i += c;
-                }
+                0 => { let (_, c) = Self::read_varint(&blob[i..])?; i += c; }
                 2 => {
                     let (len, c) = Self::read_varint(&blob[i..])?;
                     i += c;
                     let len = len as usize;
-                    if i + len > blob.len() {
-                        return None;
-                    }
-                    if field_number == 8 {
-                        return String::from_utf8(blob[i..i + len].to_vec()).ok();
+                    if i + len > blob.len() { return None; }
+                    if field_number == target {
+                        return Some(blob[i..i + len].to_vec());
                     }
                     i += len;
                 }
@@ -226,7 +228,7 @@ impl Adapter {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ).ok()?;
         let mut stmt = conn.prepare(
-            "SELECT idx, step_payload FROM steps WHERE idx > ?1 ORDER BY idx"
+            "SELECT idx, step_payload FROM steps WHERE idx > ?1 AND step_type = 15 ORDER BY idx"
         ).ok()?;
         let rows: Vec<(i64, Vec<u8>)> = stmt.query_map([after_step_idx], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -246,7 +248,7 @@ impl Adapter {
             if !rows.is_empty() {
                 eprintln!(
                     "[agy-acp] WARN: {} new steps found but none had extractable text \
-                     (protobuf field 8 missing — schema change?)",
+                     (field 20.1 missing — schema change?)",
                     rows.len()
                 );
             }
@@ -459,7 +461,7 @@ impl Adapter {
                             (Some(text), idx)
                         }
                         None => {
-                            eprintln!("[agy-acp] WARN: SQLite read returned no new text (step_payload field 8 missing?)");
+                            eprintln!("[agy-acp] WARN: SQLite read returned no new text (field 20.1 missing?)");
                             (None, last_step_idx)
                         }
                     }
@@ -506,7 +508,7 @@ impl Adapter {
                             jsonrpc: "2.0",
                             id,
                             result: None,
-                            error: Some(json!({"code":-32001,"message":"agy responded but response extraction failed — possible schema change in conversation DB"})),
+                            error: Some(json!({"code":-32001,"message":"agy responded but response extraction failed — possible schema change in conversation DB (field 20.1)"})),
                         };
                         output_lines.push(serde_json::to_string(&resp).unwrap());
                     }
@@ -608,20 +610,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_text_from_step_payload_field_8() {
-        // Simulate a protobuf with field 8 (tag 0x42) containing "hello"
+    fn test_extract_text_from_step_payload_field20_field1() {
+        // field 20 (tag 0xA2 0x01), containing sub-message with field 1 = "hello"
+        let mut inner = Vec::new();
+        inner.push(0x0A); inner.push(0x05); // field 1, LEN, 5 bytes
+        inner.extend_from_slice(b"hello");
+
         let mut blob = Vec::new();
-        // field 1, varint, value 3
-        blob.push(0x08); blob.push(0x03);
-        // field 8, length-delimited, "hello"
-        blob.push(0x42); blob.push(0x05);
-        blob.extend_from_slice(b"hello");
+        blob.push(0x08); blob.push(0x0F); // field 1 varint = 15
+        // field 20, wire type 2: tag = (20 << 3) | 2 = 0xA2, needs varint encoding: 0xA2 0x01
+        blob.push(0xA2); blob.push(0x01);
+        blob.push(inner.len() as u8);
+        blob.extend_from_slice(&inner);
         assert_eq!(Adapter::extract_text_from_step_payload(&blob), Some("hello".to_string()));
     }
 
     #[test]
-    fn test_extract_text_skips_non_field_8() {
-        // Only field 1 (varint) — no field 8
+    fn test_extract_text_returns_none_without_field20() {
+        // Only field 1 (varint) — no field 20
         let blob = vec![0x08, 0x03];
         assert_eq!(Adapter::extract_text_from_step_payload(&blob), None);
     }
@@ -629,12 +635,17 @@ mod tests {
     #[test]
     fn test_extract_text_multiline() {
         let text = b"Safe memory rules\nCompiler points out the flaws\nFast and fearless code";
+        let mut inner = Vec::new();
+        inner.push(0x0A); // field 1, LEN
+        inner.push(text.len() as u8);
+        inner.extend_from_slice(text);
+
         let mut blob = Vec::new();
         blob.push(0x08); blob.push(0x01); // field 1 varint
-        blob.push(0x42); // field 8, LEN
-        // length as varint (70 bytes)
-        blob.push(text.len() as u8);
-        blob.extend_from_slice(text);
+        // field 20
+        blob.push(0xA2); blob.push(0x01);
+        blob.push(inner.len() as u8);
+        blob.extend_from_slice(&inner);
         assert_eq!(
             Adapter::extract_text_from_step_payload(&blob),
             Some("Safe memory rules\nCompiler points out the flaws\nFast and fearless code".to_string())
@@ -815,15 +826,25 @@ mod tests {
             )"
         ).unwrap();
 
-        // Insert a step with field 8 containing "hello world"
+        // Insert a step_type=15 step with field 20 → field 1 containing "hello world"
+        let mut inner = Vec::new();
+        inner.push(0x0A); inner.push(11); // field 1, LEN, 11 bytes
+        inner.extend_from_slice(b"hello world");
         let mut payload = Vec::new();
-        payload.push(0x08); payload.push(0x01); // field 1 varint
-        payload.push(0x42); payload.push(11);   // field 8, len=11
-        payload.extend_from_slice(b"hello world");
+        payload.push(0x08); payload.push(0x0F); // field 1 varint = 15
+        payload.push(0xA2); payload.push(0x01); // field 20, LEN
+        payload.push(inner.len() as u8);
+        payload.extend_from_slice(&inner);
 
         conn.execute(
-            "INSERT INTO steps (idx, step_payload) VALUES (?1, ?2)",
+            "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
             rusqlite::params![1i64, payload],
+        ).unwrap();
+
+        // Insert a non-response step (step_type=14) — should be ignored
+        conn.execute(
+            "INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 14, ?2)",
+            rusqlite::params![2i64, vec![0x08u8, 0x0E]],
         ).unwrap();
         drop(conn);
 
@@ -842,5 +863,145 @@ mod tests {
         assert_eq!(result, None);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// Download and extract auth seed from a presigned URL (AGY_AUTH_URL env var).
+    /// Returns true if auth is ready (either already present or successfully downloaded).
+    fn prepare_auth() -> bool {
+        use std::process::Command;
+
+        let home = std::env::var("HOME").unwrap_or_default();
+        let auth_dir = format!("{}/.gemini/antigravity-cli", home);
+        // If auth already exists locally, skip download
+        if std::path::Path::new(&auth_dir).join("settings.json").exists() {
+            eprintln!("[e2e] Auth already present at {}", auth_dir);
+            return true;
+        }
+        let url = match std::env::var("AGY_AUTH_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("SKIP: AGY_AUTH_URL not set and no local auth found");
+                return false;
+            }
+        };
+        eprintln!("[e2e] Downloading auth seed from presigned URL...");
+        let status = Command::new("curl")
+            .args(["-fsSL", "-o", "/tmp/agy-auth.tar.gz", &url])
+            .status();
+        if status.map(|s| !s.success()).unwrap_or(true) {
+            eprintln!("SKIP: Failed to download auth seed (URL expired?)");
+            return false;
+        }
+        let status = Command::new("tar")
+            .args(["-xzf", "/tmp/agy-auth.tar.gz", "-C", &home])
+            .status();
+        let _ = std::fs::remove_file("/tmp/agy-auth.tar.gz");
+        status.map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// E2E test: spawns agy-acp, sends initialize → session/new → session/prompt,
+    /// and verifies the response contains expected text from real agy v1.0.4.
+    /// Requires `agy` in PATH and auth (via local or AGY_AUTH_URL). Run with: cargo test e2e -- --ignored
+    #[test]
+    #[ignore]
+    fn test_e2e_agy_acp_full_round_trip() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        if !prepare_auth() {
+            return;
+        }
+
+        // Check agy is available
+        let agy_check = Command::new("agy").arg("--help").output();
+        if agy_check.is_err() || !agy_check.unwrap().status.success() {
+            eprintln!("SKIP: agy not found in PATH");
+            return;
+        }
+
+        let binary = std::env::current_dir().unwrap().join("target/release/agy-acp");
+        if !binary.exists() {
+            panic!("Run `cargo build --release` first");
+        }
+
+        let mut child = Command::new(&binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn agy-acp");
+
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout);
+
+        // Helper to send a line and read one response line
+        let mut send_and_recv = |msg: &str| -> String {
+            writeln!(stdin, "{}", msg).unwrap();
+            stdin.flush().unwrap();
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            line
+        };
+
+        // 1. Initialize
+        let resp = send_and_recv(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientName":"e2e","clientVersion":"0.1"}}"#);
+        let init: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(init["result"]["protocolVersion"], 1);
+
+        // 2. Session new
+        let resp = send_and_recv(r#"{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}"#);
+        let session: Value = serde_json::from_str(&resp).unwrap();
+        let session_id = session["result"]["sessionId"].as_str().unwrap();
+        assert!(!session_id.is_empty());
+
+        // 3. Send prompt — ask agy to reply with a known word
+        let prompt_msg = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{{"sessionId":"{}","prompt":[{{"type":"text","text":"Reply with exactly one word: PONG"}}]}}}}"#,
+            session_id
+        );
+        writeln!(stdin, "{}", prompt_msg).unwrap();
+        stdin.flush().unwrap();
+
+        // Read lines until we get id:3 response (there may be a notification first)
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let mut got_notification = false;
+        let mut response_text = String::new();
+        loop {
+            if std::time::Instant::now() > deadline {
+                panic!("Timed out waiting for agy-acp response");
+            }
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line.is_empty() {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            let msg: Value = serde_json::from_str(line.trim()).unwrap();
+            if msg.get("method") == Some(&json!("session/update")) {
+                got_notification = true;
+                response_text = msg["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+            }
+            if msg.get("id") == Some(&json!(3)) {
+                assert!(msg["error"].is_null(), "Got error: {}", msg["error"]);
+                assert_eq!(msg["result"]["stopReason"], "end_turn");
+                break;
+            }
+        }
+
+        drop(stdin);
+        let _ = child.wait();
+
+        assert!(got_notification, "Expected session/update notification");
+        let lower = response_text.to_lowercase();
+        assert!(
+            lower.contains("pong"),
+            "Expected 'PONG' in response, got: '{}'",
+            response_text
+        );
     }
 }
