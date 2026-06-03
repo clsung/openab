@@ -85,7 +85,7 @@ jobs:
               echo "RUN mkdir -p /build/target/release"
               echo "COPY .pre-built/openab /build/target/release/openab"
               # Handle additional build stages (e.g. adapter-builder)
-              grep -oP '(?<=AS )[\w-]+' "$DF" | grep -v '^builder$' | while read stage; do
+              grep -i '^FROM rust' "$DF" | grep -oE 'AS [a-zA-Z0-9_-]+' | awk '{print $2}' | grep -v '^builder$' | while read stage; do
                 echo "FROM debian:bookworm-slim AS $stage"
                 echo "RUN mkdir -p /build/target/release"
                 echo "COPY .pre-built/* /build/target/release/"
