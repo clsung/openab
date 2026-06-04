@@ -10,7 +10,18 @@ On first use, the AI agent will typically install `uv` automatically. You can al
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-This installs `uv` to `~/.local/bin/`. Once installed, `uv run` handles everything else — downloading Python, managing dependencies, and executing your script.
+This installs `uv` to `~/.local/bin/`.
+
+To ensure `uv` is always available before the agent starts, add the install command to `hooks.pre_boot` in your `config.toml`:
+
+```toml
+[hooks]
+pre_boot = ["curl -LsSf https://astral.sh/uv/install.sh | sh"]
+```
+
+See [Hooks](hooks.md) for details.
+
+Once installed, `uv run` handles everything else — downloading Python, managing dependencies, and executing your script.
 
 ## Quick Start
 
