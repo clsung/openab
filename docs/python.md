@@ -1,0 +1,121 @@
+# Running Python Scripts in OpenAB
+
+OpenAB Docker images do **not** ship a system Python. This keeps images small and avoids version conflicts. Instead, use [`uv`](https://docs.astral.sh/uv/) — which is pre-installed in all OAB images — to run Python scripts on demand.
+
+## Quick Start
+
+```bash
+uv run script.py
+```
+
+`uv run` automatically:
+
+1. Detects the required Python version (from `.python-version` or `pyproject.toml`)
+2. Downloads and installs a managed Python if none is available
+3. Creates a virtual environment and installs dependencies
+4. Runs your script
+
+No manual `python` install needed.
+
+## Pin a Python Version
+
+Create a `.python-version` file in your working directory:
+
+```bash
+uv python pin 3.12
+```
+
+This writes `.python-version` with `3.12`, ensuring all `uv run` invocations use that version.
+
+## Scripts with Dependencies
+
+For a standalone script that needs packages, add inline metadata:
+
+```python
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["requests", "beautifulsoup4"]
+# ///
+
+import requests
+from bs4 import BeautifulSoup
+
+resp = requests.get("https://example.com")
+soup = BeautifulSoup(resp.text, "html.parser")
+print(soup.title.string)
+```
+
+Then simply:
+
+```bash
+uv run script.py
+```
+
+`uv` resolves and installs the declared dependencies automatically.
+
+Alternatively, pass dependencies on the command line:
+
+```bash
+uv run --with requests --with beautifulsoup4 script.py
+```
+
+## Project with `pyproject.toml`
+
+For multi-file projects, use a standard `pyproject.toml`:
+
+```toml
+[project]
+name = "my-tool"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["httpx"]
+```
+
+Then run any module:
+
+```bash
+uv run python -m my_tool
+```
+
+`uv` syncs the environment automatically before execution.
+
+## How `uv run` Finds Python
+
+Resolution order:
+
+1. `.python-version` file (project root or parents)
+2. Existing virtual environment (`.venv` or `VIRTUAL_ENV`)
+3. `requires-python` in `pyproject.toml`
+4. uv-managed installs (`~/.local/share/uv/python/`)
+5. System `PATH` fallback
+
+If no suitable interpreter exists, `uv` downloads one automatically.
+
+## Example: Skill Script
+
+A typical OAB skill script using Python:
+
+```bash
+#!/bin/bash
+# my-skill/scripts/run.sh
+uv run /home/agent/.kiro/skills/my-skill/scripts/main.py "$@"
+```
+
+The Python script can use inline dependencies:
+
+```python
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["tweepy"]
+# ///
+
+import tweepy
+# ... skill logic
+```
+
+## Tips
+
+- **First run is slower** — Python download + dependency install is cached for subsequent runs.
+- **Offline environments** — Pre-install Python with `uv python install 3.12` during image build if network is unavailable at runtime.
+- **Force a version** — `uv run --python 3.13 script.py` overrides all resolution.
+- **See installed Pythons** — `uv python list` shows all available interpreters.
