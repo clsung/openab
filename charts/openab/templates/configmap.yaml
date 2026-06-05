@@ -1,5 +1,6 @@
 {{- range $name, $cfg := .Values.agents }}
 {{- if ne (include "openab.agentEnabled" $cfg) "false" }}
+{{- if not $cfg.configUrl }}
 {{- $d := dict "ctx" $ "agent" $name "cfg" $cfg }}
 ---
 apiVersion: v1
@@ -250,5 +251,6 @@ data:
   AGENTS.md: |
     {{- $cfg.agentsMd | nindent 4 }}
   {{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
