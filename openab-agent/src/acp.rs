@@ -556,6 +556,9 @@ impl AcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_initialize_response() {
@@ -570,6 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_new() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // Set a fake key so from_env() succeeds in CI
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "test-key") };
         let mut server = AcpServer::new();
@@ -588,6 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_new_missing_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // Ensure no OAuth token exists either
         let auth_path =
             std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
