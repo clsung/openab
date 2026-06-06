@@ -229,6 +229,13 @@ agents:
     #     size: 1Gi
     #   image: "ghcr.io/openabdev/openab-grok"
     image: ""
+    # configUrl: when set, openab uses `-c <URL>` to fetch config remotely
+    # instead of mounting the chart-generated ConfigMap. The ConfigMap and its
+    # volume mount are skipped entirely. Use for externally managed configs.
+    # ⚠️ When configUrl is set, agentsMd has no effect (no ConfigMap to mount from).
+    # Provision AGENTS.md via the PVC, extraVolumes, or include it in the remote config.
+    # Example: "https://raw.githubusercontent.com/myorg/config/main/openab.toml"
+    configUrl: ""
     command: kiro-cli
     args:
       - acp
