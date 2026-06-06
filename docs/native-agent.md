@@ -22,8 +22,8 @@ openab-agent
 
 ```toml
 [agent]
-command = "openab-agent" # optional — defaults from OPENAB_AGENT_COMMAND
-working_dir = "/home/agent" # optional — defaults to $HOME
+# command = "openab-agent"  # optional — defaults from OPENAB_AGENT_COMMAND
+# working_dir = "/home/agent"  # optional — defaults to $HOME
 env = { OPENAB_AGENT_OPENAI_MODEL = "gpt-5.4-mini" }
 ```
 
