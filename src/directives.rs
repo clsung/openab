@@ -16,6 +16,7 @@ static DIRECTIVE_RE: LazyLock<Regex> =
 #[derive(Debug, Clone, Default)]
 pub struct SessionMetadata {
     /// Resolved canonical workspace path (None = use default working_dir).
+    #[allow(dead_code)]
     pub workspace: Option<PathBuf>,
     /// Thread title override (None = use generated title).
     pub title: Option<String>,
@@ -41,7 +42,7 @@ pub fn parse_directives(input: &str) -> ParseResult {
     let mut remaining = input;
 
     loop {
-        remaining = remaining.trim_start_matches(|c: char| c == ' ' || c == '\t');
+        remaining = remaining.trim_start_matches([' ', '\t']);
         if remaining.starts_with('\n') || remaining.starts_with("\r\n") {
             // A blank line after directives = end of header
             let next = remaining.trim_start_matches(['\r', '\n']);
@@ -122,7 +123,7 @@ pub fn resolve_workspace(
     // Rule 3: canonicalize both paths
     let canonical_home = bot_home.canonicalize().map_err(|e| {
         warn!(path = %bot_home.display(), error = %e, "cannot canonicalize bot home");
-        format!("Internal error: cannot resolve bot home directory")
+        "Internal error: cannot resolve bot home directory".to_string()
     })?;
 
     let canonical_target = expanded.canonicalize().map_err(|e| {
@@ -138,32 +139,6 @@ pub fn resolve_workspace(
     }
 
     Ok(canonical_target)
-}
-
-/// Persistence format for session metadata (JSON).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-pub struct PersistedSessionMeta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-}
-
-impl PersistedSessionMeta {
-    pub fn from_metadata(meta: &SessionMetadata) -> Self {
-        Self {
-            workspace: meta.workspace.as_ref().map(|p| p.display().to_string()),
-            title: meta.title.clone(),
-        }
-    }
-
-    pub fn to_metadata(&self) -> SessionMetadata {
-        SessionMetadata {
-            workspace: self.workspace.as_ref().map(PathBuf::from),
-            title: self.title.clone(),
-            raw: HashMap::new(),
-        }
-    }
 }
 
 #[cfg(test)]
