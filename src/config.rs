@@ -508,6 +508,16 @@ pub enum ToolDisplay {
     None,
 }
 
+impl ToolDisplay {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Compact => "compact",
+            Self::None => "none",
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ToolDisplay {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;

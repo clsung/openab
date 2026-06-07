@@ -136,6 +136,11 @@ async fn main() -> anyhow::Result<()> {
     }
     let shutdown_hook = cfg.hooks.pre_shutdown.clone();
 
+    // Inject OPENAB_TOOL_DISPLAY into agent env so ACP adapters (e.g. agy-acp)
+    // can honor the platform's toolDisplay setting without manual config duplication.
+    cfg.agent.env.entry("OPENAB_TOOL_DISPLAY".to_string())
+        .or_insert_with(|| cfg.reactions.tool_display.as_str().to_string());
+
     let pool = Arc::new(acp::SessionPool::new(cfg.agent, cfg.pool.max_sessions));
     let ttl_secs = cfg.pool.session_ttl_hours * 3600;
 
