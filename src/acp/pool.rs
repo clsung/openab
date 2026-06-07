@@ -137,8 +137,9 @@ impl SessionPool {
     pub async fn has_active_session(&self, thread_id: &str) -> bool {
         let state = self.state.read().await;
         if let Some(conn) = state.active.get(thread_id) {
-            if let Ok(c) = conn.try_lock() {
-                return c.alive();
+            match conn.try_lock() {
+                Ok(c) => return c.alive(),
+                Err(_) => return true, // lock held = connection busy streaming = alive
             }
         }
         false
