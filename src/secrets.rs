@@ -440,4 +440,40 @@ mod tests {
         assert!(result.contains("PATH="), "PATH should be in sanitized env");
         std::env::remove_var("OPENAB_TEST_LEAKED_SECRET");
     }
+
+    #[tokio::test]
+    async fn resolve_exec_timeout() {
+        use crate::config::{AwsSecretsConfig, ExecSecretsConfig, SecretsConfig};
+        let cfg = SecretsConfig {
+            aws: AwsSecretsConfig::default(),
+            exec: ExecSecretsConfig { timeout_seconds: 1 },
+            refs: HashMap::new(),
+        };
+        // sleep 10 will be killed after 1s timeout
+        let result = resolve_exec("test", "exec:///bin/sleep 10", &cfg).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("timed out"), "expected timeout error, got: {err}");
+    }
+
+    #[test]
+    fn substitute_and_reparse_integration() {
+        let mut secrets = HashMap::new();
+        secrets.insert("token".to_owned(), "xoxb-secret-value".to_owned());
+        secrets.insert("key".to_owned(), "sk-with\"special\\chars".to_owned());
+
+        let raw = r#"
+[discord]
+bot_token = "${secrets.token}"
+
+[agent]
+command = "echo"
+args = ["--key", "${secrets.key}"]
+"#;
+        let substituted = substitute(raw, &secrets);
+        // Verify the substituted text is valid TOML that parses correctly
+        let cfg: crate::config::Config = toml::from_str(&substituted)
+            .expect("substituted config should be valid TOML");
+        assert_eq!(cfg.discord.unwrap().bot_token, "xoxb-secret-value");
+        assert_eq!(cfg.agent.args[1], "sk-with\"special\\chars");
+    }
 }
