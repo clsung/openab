@@ -112,6 +112,7 @@ fn parse_aws_sm_uri(uri: &str) -> Option<(String, String)> {
 }
 
 // -- Exec provider --
+// Note: script path is delimited by the first space. Paths containing spaces are not supported.
 
 async fn resolve_exec(key: &str, uri: &str, cfg: &SecretsConfig) -> anyhow::Result<String> {
     let rest = uri.strip_prefix("exec://").unwrap();
