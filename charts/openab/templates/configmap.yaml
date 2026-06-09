@@ -168,7 +168,10 @@ data:
 
     [workspace.aliases]
     {{- range $alias, $path := ($cfg.workspace).aliases }}
-    {{ $alias }} = {{ $path | toJson }}
+    {{- if not (kindIs "string" $path) }}
+    {{- fail (printf "agents.%s.workspace.aliases.%s value must be a string — got: %v" $name $alias $path) }}
+    {{- end }}
+    {{ $alias | toJson }} = {{ $path | toJson }}
     {{- end }}
     {{- end }}
 
