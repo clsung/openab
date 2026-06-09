@@ -164,6 +164,14 @@ data:
     max_sessions = {{ ($cfg.pool).maxSessions | default 10 }}
     session_ttl_hours = {{ ($cfg.pool).sessionTtlHours | default 24 }}
 
+    {{- if ($cfg.workspace).aliases }}
+
+    [workspace.aliases]
+    {{- range $alias, $path := ($cfg.workspace).aliases }}
+    {{ $alias }} = {{ $path | toJson }}
+    {{- end }}
+    {{- end }}
+
     [reactions]
     enabled = {{ if hasKey ($cfg.reactions) "enabled" }}{{ ($cfg.reactions).enabled }}{{ else }}true{{ end }}
     remove_after_reply = {{ if hasKey ($cfg.reactions) "removeAfterReply" }}{{ ($cfg.reactions).removeAfterReply }}{{ else }}false{{ end }}
