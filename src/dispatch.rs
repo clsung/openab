@@ -48,6 +48,13 @@ pub struct BufferedMessage {
     /// Snapshot at submit time. Captured per-message so a batch reflects the
     /// freshest known state; `dispatch_batch` reads `batch.last()`.
     pub other_bot_present: bool,
+    /// Slack streaming recipient `(user_id, team_id)` for `chat.startStream`,
+    /// captured at message-arrival time (after allow-list) and bound to this turn
+    /// — no shared thread cache, so no cross-turn race. Populated for real-user
+    /// Slack turns regardless of `assistant_mode`; only *consumed* when assistant
+    /// mode's native streaming is active. `None` for non-Slack platforms and
+    /// bot-authored turns.
+    pub recipient: Option<(String, String)>,
 }
 
 /// How `thread_key` is built for the dispatcher's per-thread map.
@@ -140,6 +147,7 @@ pub trait DispatchTarget: Send + Sync + 'static {
         thread_channel: &ChannelRef,
         reactions: Arc<StatusReactionController>,
         other_bot_present: bool,
+        recipient: Option<(String, String)>,
     ) -> Result<()>;
 }
 
@@ -173,6 +181,7 @@ impl DispatchTarget for AdapterRouter {
         thread_channel: &ChannelRef,
         reactions: Arc<StatusReactionController>,
         other_bot_present: bool,
+        recipient: Option<(String, String)>,
     ) -> Result<()> {
         AdapterRouter::stream_prompt_blocks(
             self,
@@ -182,6 +191,7 @@ impl DispatchTarget for AdapterRouter {
             thread_channel,
             reactions,
             other_bot_present,
+            recipient,
         )
         .await
     }
@@ -616,12 +626,14 @@ async fn dispatch_batch(
     let session_key = Dispatcher::session_key(thread_channel);
 
     // Apply 👀 reaction to every message in the batch before dispatch (§6.7).
-    // Sequential — batches are typically small (≤ low single digits) so the
-    // serialization cost is sub-second and not user-visible; sequential keeps the
-    // dispatch path free of `futures_util::join_all` and easier to reason about.
-    let queued_emoji = &target.reactions_config().emojis.queued;
-    for msg in batch.iter() {
-        let _ = adapter.add_reaction(&msg.trigger_msg, queued_emoji).await;
+    // Skip when assistant status API is active — uses
+    // assistant.threads.setStatus instead of emoji reactions.
+    let assistant_status = adapter.uses_assistant_status();
+    if !assistant_status {
+        let queued_emoji = &target.reactions_config().emojis.queued;
+        for msg in batch.iter() {
+            let _ = adapter.add_reaction(&msg.trigger_msg, queued_emoji).await;
+        }
     }
 
     // Collect per-event observability data (before consuming the batch).
@@ -631,6 +643,10 @@ async fn dispatch_batch(
         .map(|m| m.arrived_at.elapsed().as_millis())
         .collect();
     let senders: Vec<String> = batch.iter().map(|m| m.sender_name.clone()).collect();
+
+    // Native-streaming recipient is bound to the turn (captured per-message). A
+    // batch attributes to the most recent sender; None for non-Slack/bot turns.
+    let recipient: Option<(String, String)> = batch.last().and_then(|m| m.recipient.clone());
 
     // Anchor reactions on the last message in the batch (before consuming).
     let trigger_msg = batch.last().unwrap().trigger_msg.clone();
@@ -759,25 +775,30 @@ async fn dispatch_batch(
             &dispatch_channel,
             reactions.clone(),
             other_bot_present,
+            recipient,
         )
         .await;
 
-    match &result {
-        Ok(()) => reactions.set_done().await,
-        Err(_) => reactions.set_error().await,
-    }
+    // In assistant status mode, all status is conveyed via
+    // assistant.threads.setStatus — skip emoji reactions entirely.
+    if !assistant_status {
+        match &result {
+            Ok(()) => reactions.set_done().await,
+            Err(_) => reactions.set_error().await,
+        }
 
-    let hold_ms = if result.is_ok() {
-        reactions_config.timing.done_hold_ms
-    } else {
-        reactions_config.timing.error_hold_ms
-    };
-    if reactions_config.remove_after_reply {
-        let reactions = reactions;
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
-            reactions.clear().await;
-        });
+        let hold_ms = if result.is_ok() {
+            reactions_config.timing.done_hold_ms
+        } else {
+            reactions_config.timing.error_hold_ms
+        };
+        if reactions_config.remove_after_reply {
+            let reactions = reactions;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(hold_ms)).await;
+                reactions.clear().await;
+            });
+        }
     }
 
     if let Err(ref e) = result {
@@ -1403,6 +1424,7 @@ mod tests {
             thread_channel: &ChannelRef,
             _reactions: Arc<StatusReactionController>,
             other_bot_present: bool,
+            _recipient: Option<(String, String)>,
         ) -> Result<()> {
             self.calls.lock().unwrap().push(RecordedDispatch {
                 block_count: content_blocks.len(),
@@ -1481,6 +1503,7 @@ mod tests {
             arrived_at: Instant::now(),
             estimated_tokens: tokens,
             other_bot_present: false,
+            recipient: None,
         }
     }
 

@@ -220,6 +220,7 @@ async fn main() -> anyhow::Result<()> {
             s.bot_token.clone(),
             session_ttl_dur,
             s.allow_bot_messages,
+            s.assistant_mode,
         ))
     });
 

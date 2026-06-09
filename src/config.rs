@@ -363,6 +363,13 @@ pub struct SlackConfig {
     /// Batched mode only: soft token cap for greedy drain. Default: 24000.
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
+    /// Slack "AI app / Assistant" mode: stream replies via chat.startStream +
+    /// assistant.threads.setStatus instead of post+edit + emoji reactions.
+    /// Requires the Slack app to be an AI app (assistant feature enabled) with
+    /// the `assistant:write` scope. Default: true — set to false for Slack apps
+    /// that are not AI apps (no `assistant:write`) to keep emoji-reaction status.
+    #[serde(default = "default_true")]
+    pub assistant_mode: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1211,5 +1218,16 @@ command = "echo"
         assert!(cfg.secrets.aws.region.is_none());
         assert!(cfg.secrets.aws.endpoint_url.is_none());
         assert_eq!(cfg.secrets.exec.timeout_seconds, 10);
+    }
+
+    #[test]
+    fn slack_assistant_mode_defaults_true_and_parses_false() {
+        let cfg: SlackConfig = toml::from_str("bot_token = \"x\"\napp_token = \"y\"\n").unwrap();
+        assert!(cfg.assistant_mode, "assistant_mode must default to true");
+
+        let cfg2: SlackConfig =
+            toml::from_str("bot_token = \"x\"\napp_token = \"y\"\nassistant_mode = false\n")
+                .unwrap();
+        assert!(!cfg2.assistant_mode);
     }
 }
