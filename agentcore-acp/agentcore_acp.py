@@ -40,6 +40,20 @@ def write_notification(method: str, params: dict):
     sys.stdout.flush()
 
 
+def emit_text_chunk(text: str):
+    """Emit a text chunk in the format OAB's classify_notification expects.
+
+    OAB parses: params.update.sessionUpdate == "agent_message_chunk"
+                params.update.content.text == <the text>
+    """
+    write_notification("session/update", {
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"text": text},
+        }
+    })
+
+
 # ---------------------------------------------------------------------------
 # Sender context parsing
 # ---------------------------------------------------------------------------
@@ -238,30 +252,26 @@ class AcpAdapter:
         # Invoke with per-session serialization
         session_lock = self._get_session_lock(acp_sid)
         with session_lock:
-            cold_start_notified = False
-            start_time = time.time()
+            first_chunk_received = threading.Event()
+
+            # Cold start timer: if no chunk arrives within 3s, notify user
+            def _cold_start_timer():
+                if not first_chunk_received.wait(timeout=3.0):
+                    emit_text_chunk("⏳ Starting agent environment...")
+
+            timer = threading.Thread(target=_cold_start_timer, daemon=True)
+            timer.start()
 
             try:
                 for chunk in self.client.invoke_streaming(runtime_sid, prompt_text):
-                    if not cold_start_notified and time.time() - start_time > 3:
-                        write_notification(
-                            "notifications/content",
-                            {"type": "text", "text": "⏳ Starting agent environment..."},
-                        )
-                        cold_start_notified = True
-
-                    write_notification(
-                        "notifications/content",
-                        {"type": "text", "text": chunk},
-                    )
+                    first_chunk_received.set()
+                    emit_text_chunk(chunk)
             except self.client.client.exceptions.ResourceNotFoundException:
+                first_chunk_received.set()
                 # Session expired — re-invoke (AgentCore auto-provisions new microVM)
                 try:
                     for chunk in self.client.invoke_streaming(runtime_sid, prompt_text):
-                        write_notification(
-                            "notifications/content",
-                            {"type": "text", "text": chunk},
-                        )
+                        emit_text_chunk(chunk)
                 except Exception as e:
                     write_response(id, error={"code": -32603, "message": str(e)})
                     return
