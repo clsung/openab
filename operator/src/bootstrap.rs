@@ -127,7 +127,7 @@ async fn create(config: &aws_config::SdkConfig) -> Result<()> {
         eprintln!("  ✓ Created S3 bucket: {bucket}");
     }
 
-    // 2. ECS Cluster
+    // 2. ECS Cluster — save state incrementally after this point
     let cluster_arn = match ecs.describe_clusters().clusters(CLUSTER_NAME).send().await {
         Ok(resp) if resp.clusters().first().is_some_and(|c| c.status() == Some("ACTIVE")) => {
             let arn = resp.clusters()[0].cluster_arn().unwrap_or_default().to_string();
@@ -156,6 +156,25 @@ async fn create(config: &aws_config::SdkConfig) -> Result<()> {
 
     // 3. IAM Execution Role
     let execution_role_arn = ensure_role(&iam, EXECUTION_ROLE, &account).await?;
+
+    // Save partial state (in case subsequent steps fail)
+    let mut state = BootstrapState {
+        version: 1,
+        account: account.clone(),
+        region: region.clone(),
+        bucket: bucket.clone(),
+        resources: BootstrapResources {
+            cluster_arn: cluster_arn.clone(),
+            execution_role_arn: execution_role_arn.clone(),
+            task_role_arn: String::new(),
+            security_group_id: String::new(),
+            log_group: String::new(),
+            subnets: vec![],
+            vpc_id: String::new(),
+        },
+        created_at: chrono_now(),
+    };
+    save_state(&s3, &bucket, &state).await.ok();
     iam.attach_role_policy()
         .role_name(EXECUTION_ROLE)
         .policy_arn("arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy")
@@ -229,23 +248,12 @@ async fn create(config: &aws_config::SdkConfig) -> Result<()> {
         Err(_) => eprintln!("  ✓ Log group already exists: {LOG_GROUP}"),
     }
 
-    // 8. Save state
-    let state = BootstrapState {
-        version: 1,
-        account: account.clone(),
-        region: region.clone(),
-        bucket: bucket.clone(),
-        resources: BootstrapResources {
-            cluster_arn,
-            execution_role_arn,
-            task_role_arn,
-            security_group_id: sg_id,
-            log_group: LOG_GROUP.to_string(),
-            subnets,
-            vpc_id,
-        },
-        created_at: chrono_now(),
-    };
+    // 8. Save final state
+    state.resources.task_role_arn = task_role_arn;
+    state.resources.security_group_id = sg_id;
+    state.resources.log_group = LOG_GROUP.to_string();
+    state.resources.subnets = subnets;
+    state.resources.vpc_id = vpc_id;
     save_state(&s3, &bucket, &state).await?;
 
     eprintln!("\n✅ Bootstrap complete!");
@@ -285,14 +293,16 @@ async fn teardown(config: &aws_config::SdkConfig) -> Result<()> {
 
     // Reverse order
     // 1. Log group
-    logs.delete_log_group().log_group_name(LOG_GROUP).send().await.ok();
-    eprintln!("  ✓ Deleted log group: {LOG_GROUP}");
+    match logs.delete_log_group().log_group_name(LOG_GROUP).send().await {
+        Ok(_) => eprintln!("  ✓ Deleted log group: {LOG_GROUP}"),
+        Err(e) => eprintln!("  ⚠ Failed to delete log group: {e}"),
+    }
 
     // 2. Security group
-    ec2.delete_security_group()
-        .group_id(&state.resources.security_group_id)
-        .send().await.ok();
-    eprintln!("  ✓ Deleted security group: {}", state.resources.security_group_id);
+    match ec2.delete_security_group().group_id(&state.resources.security_group_id).send().await {
+        Ok(_) => eprintln!("  ✓ Deleted security group: {}", state.resources.security_group_id),
+        Err(e) => eprintln!("  ⚠ Failed to delete security group (may have attached ENIs): {e}"),
+    }
 
     // 3. IAM roles
     delete_role(&iam, TASK_ROLE).await;
@@ -301,8 +311,10 @@ async fn teardown(config: &aws_config::SdkConfig) -> Result<()> {
     eprintln!("  ✓ Deleted IAM role: {EXECUTION_ROLE}");
 
     // 4. ECS Cluster
-    ecs.delete_cluster().cluster(CLUSTER_NAME).send().await.ok();
-    eprintln!("  ✓ Deleted ECS cluster: {CLUSTER_NAME}");
+    match ecs.delete_cluster().cluster(CLUSTER_NAME).send().await {
+        Ok(_) => eprintln!("  ✓ Deleted ECS cluster: {CLUSTER_NAME}"),
+        Err(e) => eprintln!("  ⚠ Failed to delete cluster: {e}"),
+    }
 
     // 5. Delete state file (keep bucket for user data)
     s3.delete_object().bucket(&bucket).key(STATE_KEY).send().await.ok();
@@ -379,9 +391,33 @@ async fn delete_role(iam: &IamClient, name: &str) {
 }
 
 fn chrono_now() -> String {
-    // Simple ISO 8601 without chrono crate
-    let duration = std::time::SystemTime::now()
+    // UTC timestamp without chrono crate (YYYY-MM-DDTHH:MM:SSZ approximation)
+    let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}s since epoch", duration.as_secs())
+        .unwrap_or_default()
+        .as_secs();
+    // Convert to simple UTC string
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let mins = (time_secs % 3600) / 60;
+    let s = time_secs % 60;
+    // Days since 1970-01-01 to Y-M-D (simplified)
+    let mut y = 1970u64;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
+        if remaining < days_in_year { break; }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days: [u64; 12] = [31, if leap {29} else {28}, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0;
+    for md in month_days {
+        if remaining < md { break; }
+        remaining -= md;
+        m += 1;
+    }
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, m + 1, remaining + 1, hours, mins, s)
 }

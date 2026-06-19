@@ -8,7 +8,8 @@ use aws_sdk_ecs::types::{
 use aws_sdk_s3::primitives::ByteStream;
 use std::path::Path;
 
-/// Try to load bootstrap state for networking defaults
+/// Try to load bootstrap state for networking defaults (used in future for auto-fill)
+#[allow(dead_code)]
 async fn load_bootstrap_state(config: &aws_config::SdkConfig) -> Option<BootstrapState> {
     let sts = aws_sdk_sts::Client::new(config);
     let account = sts.get_caller_identity().send().await.ok()?
@@ -102,8 +103,16 @@ async fn apply_ecs(
     };
 
     let service_name = m.ecs_service_name();
-    let bucket = std::env::var("OAB_CONTROL_PLANE_BUCKET")
-        .unwrap_or_else(|_| "oab-control-plane".to_string());
+    let bucket = if let Ok(b) = std::env::var("OAB_CONTROL_PLANE_BUCKET") {
+        b
+    } else {
+        // Match bootstrap naming convention: oab-control-plane-{account}
+        let sts = aws_sdk_sts::Client::new(config);
+        let account = sts.get_caller_identity().send().await
+            .ok().and_then(|r| r.account().map(|a| a.to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("oab-control-plane-{account}")
+    };
 
     // Read current generation from S3 manifest (if exists), increment
     let manifest_key = format!("manifests/{}/{}.yaml", m.metadata.namespace, m.metadata.name);

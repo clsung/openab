@@ -130,8 +130,16 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("✓ Done");
             Ok(())
         }
-        Commands::Bootstrap { delete, status, region: _ } => {
-            bootstrap::run(&config, delete, status).await
+        Commands::Bootstrap { delete, status, region } => {
+            let cfg = if let Some(ref r) = region {
+                aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(aws_config::Region::new(r.clone()))
+                    .load()
+                    .await
+            } else {
+                config.clone()
+            };
+            bootstrap::run(&cfg, delete, status).await
         }
     }
 }
