@@ -271,6 +271,12 @@ async fn create(config: &aws_config::SdkConfig) -> Result<()> {
     eprintln!("\n✅ Bootstrap complete!");
     eprintln!("   State saved to: s3://{bucket}/{STATE_KEY}");
     eprintln!("   You can now run: oabctl apply -f <manifest.yaml>");
+
+    // Save bucket to local config for future commands
+    let mut local_cfg = crate::config::OabConfig::load().unwrap_or_default();
+    local_cfg.bootstrap.bucket = Some(bucket);
+    local_cfg.save().ok();
+
     Ok(())
 }
 

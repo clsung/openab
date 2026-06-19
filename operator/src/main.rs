@@ -1,6 +1,7 @@
 mod manifest;
 mod apply;
 mod bootstrap;
+mod config;
 mod get;
 mod delete;
 

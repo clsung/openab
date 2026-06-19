@@ -103,10 +103,10 @@ async fn apply_ecs(
     };
 
     let service_name = m.ecs_service_name();
-    let bucket = if let Ok(b) = std::env::var("OAB_CONTROL_PLANE_BUCKET") {
+    let bucket = if let Some(b) = crate::config::OabConfig::load().ok().and_then(|c| c.bucket()) {
         b
     } else {
-        // Match bootstrap naming convention: oab-control-plane-{account}
+        // Fallback: derive from account ID
         let sts = aws_sdk_sts::Client::new(config);
         let account = sts.get_caller_identity().send().await
             .ok().and_then(|r| r.account().map(|a| a.to_string()))
