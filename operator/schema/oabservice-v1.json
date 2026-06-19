@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oab.dev/schemas/oabservice-v1.json",
+  "title": "OABService",
+  "description": "Declarative manifest for deploying an OpenAB agent",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "const": "oab.dev/v1"
+    },
+    "kind": {
+      "const": "OABService"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "namespace"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Agent name (DNS-compatible)"
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Logical namespace (e.g. prod, staging)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "required": ["image", "resources", "runtime"],
+      "properties": {
+        "image": {
+          "type": "string",
+          "description": "Container image URI"
+        },
+        "resources": {
+          "type": "object",
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": {
+              "type": "string",
+              "description": "CPU units (e.g. '256' for ECS, '256m' for K8S)",
+              "examples": ["256", "512", "1024"]
+            },
+            "memory": {
+              "type": "string",
+              "description": "Memory (e.g. '512' for ECS MB, '512Mi' for K8S)",
+              "examples": ["512", "1024", "2048"]
+            }
+          },
+          "additionalProperties": false
+        },
+        "configFrom": {
+          "type": "string",
+          "description": "S3 URI to agent config.toml"
+        },
+        "bootstrapFrom": {
+          "type": "string",
+          "description": "S3 URI to agent home archive (memory, state)"
+        },
+        "secrets": {
+          "type": "object",
+          "description": "Map of env var name → SSM parameter path",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "required": ["type"],
+          "oneOf": [
+            { "$ref": "#/$defs/ecsRuntime" },
+            { "$ref": "#/$defs/kubernetesRuntime" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ecsRuntime": {
+      "type": "object",
+      "required": ["type", "networking"],
+      "properties": {
+        "type": { "const": "ecs" },
+        "capacityProvider": {
+          "type": "string",
+          "enum": ["FARGATE", "FARGATE_SPOT"],
+          "default": "FARGATE"
+        },
+        "networking": {
+          "type": "object",
+          "required": ["subnets", "securityGroups"],
+          "properties": {
+            "subnets": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            },
+            "securityGroups": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            },
+            "assignPublicIp": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "kubernetesRuntime": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "kubernetes" },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "serviceAccount": {
+          "type": "string"
+        },
+        "tolerations": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

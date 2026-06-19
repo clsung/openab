@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,27 +21,41 @@ pub struct Metadata {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Spec {
-    #[serde(default = "default_capacity_provider")]
-    pub capacity_provider: String,
-    pub cpu: i32,
-    pub memory: i32,
-    pub task_definition: TaskDefinition,
+    pub image: String,
+    pub resources: Resources,
+    #[serde(default)]
+    pub config_from: Option<String>,
     #[serde(default)]
     pub bootstrap_from: Option<String>,
-    pub networking: Networking,
-    pub config: AgentConfig,
     #[serde(default)]
-    pub secrets: Vec<SecretRef>,
+    pub secrets: HashMap<String, String>,
+    pub runtime: Runtime,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct TaskDefinition {
-    pub image: String,
+pub struct Resources {
+    pub cpu: String,
+    pub memory: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Runtime {
+    Ecs(EcsRuntime),
+    Kubernetes(KubernetesRuntime),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Networking {
+pub struct EcsRuntime {
+    #[serde(default = "default_capacity_provider")]
+    pub capacity_provider: String,
+    pub networking: EcsNetworking,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcsNetworking {
     pub subnets: Vec<String>,
     pub security_groups: Vec<String>,
     #[serde(default)]
@@ -49,53 +64,11 @@ pub struct Networking {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SecretRef {
-    pub name: String,
-    pub value_from: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct AgentConfig {
+pub struct KubernetesRuntime {
     #[serde(default)]
-    pub channels: Vec<ChannelConfig>,
+    pub node_selector: HashMap<String, String>,
     #[serde(default)]
-    pub backend: Option<BackendConfig>,
-    #[serde(default)]
-    pub steering: Option<SteeringConfig>,
-    #[serde(default)]
-    pub features: Option<FeaturesConfig>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ChannelConfig {
-    #[serde(rename = "type")]
-    pub channel_type: String,
-    #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, serde_yaml::Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct BackendConfig {
-    #[serde(rename = "type")]
-    pub backend_type: String,
-    #[serde(default)]
-    pub model_id: Option<String>,
-    #[serde(default)]
-    pub region: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct SteeringConfig {
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct FeaturesConfig {
-    #[serde(default)]
-    pub stt: bool,
-    #[serde(default)]
-    pub cronjob: bool,
+    pub service_account: Option<String>,
 }
 
 fn default_capacity_provider() -> String {
@@ -116,15 +89,25 @@ impl OABServiceManifest {
         if self.metadata.namespace.is_empty() {
             anyhow::bail!("metadata.namespace is required");
         }
-        let valid_cp = ["FARGATE", "FARGATE_SPOT"];
-        if !valid_cp.contains(&self.spec.capacity_provider.as_str()) {
-            anyhow::bail!("capacityProvider must be FARGATE or FARGATE_SPOT");
+        if self.spec.image.is_empty() {
+            anyhow::bail!("spec.image is required");
         }
-        if self.spec.networking.subnets.is_empty() {
-            anyhow::bail!("networking.subnets must not be empty");
-        }
-        if self.spec.networking.security_groups.is_empty() {
-            anyhow::bail!("networking.securityGroups must not be empty");
+        match &self.spec.runtime {
+            Runtime::Ecs(ecs) => {
+                let valid_cp = ["FARGATE", "FARGATE_SPOT"];
+                if !valid_cp.contains(&ecs.capacity_provider.as_str()) {
+                    anyhow::bail!("runtime.capacityProvider must be FARGATE or FARGATE_SPOT");
+                }
+                if ecs.networking.subnets.is_empty() {
+                    anyhow::bail!("runtime.networking.subnets must not be empty");
+                }
+                if ecs.networking.security_groups.is_empty() {
+                    anyhow::bail!("runtime.networking.securityGroups must not be empty");
+                }
+            }
+            Runtime::Kubernetes(_) => {
+                // K8S validation: minimal for now
+            }
         }
         Ok(())
     }
