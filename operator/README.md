@@ -75,6 +75,20 @@ spec:
 
 The manifest schema is defined in [`schema/oabservice-v2.json`](schema/oabservice-v2.json) for IDE validation.
 
+## State Store
+
+`oabctl` uses an S3 bucket as its control plane state store (similar to Terraform's S3 backend):
+
+```
+s3://<bucket>/
+  manifests/{namespace}/{name}.yaml   ← desired state (generation tracked)
+```
+
+- **Default bucket:** `oab-control-plane`
+- **Override:** set `OAB_CONTROL_PLANE_BUCKET` env var
+- Each `oabctl apply` increments the `generation` counter in the stored manifest
+- This enables drift detection and rollback tracking in future versions
+
 ## Commands
 
 | Command | Description |
