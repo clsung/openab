@@ -138,7 +138,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    if !input.trim().is_empty() && !input.trim().eq_ignore_ascii_case("y") {
+    if !input.trim().is_empty() && !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
         eprintln!("Aborted.");
         return Ok(());
     }
