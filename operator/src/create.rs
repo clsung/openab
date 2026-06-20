@@ -33,9 +33,26 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str) ->
     // Store in Secrets Manager (single secret with DISCORD_BOT_TOKEN key)
     let sm = SmClient::new(config);
     let secret_name = format!("oab/{namespace}/{name}");
-    let secret_value = serde_json::json!({ "DISCORD_BOT_TOKEN": token }).to_string();
-    store_secret(&sm, &secret_name, &secret_value).await?;
-    eprintln!("   → Stored in Secrets Manager: {secret_name}#DISCORD_BOT_TOKEN\n");
+
+    // 3b. STT API key (optional)
+    eprint!("  STT API key (Groq, enter to skip): ");
+    io::stdout().flush()?;
+    let mut stt_input = String::new();
+    io::stdin().read_line(&mut stt_input)?;
+    let stt_key = stt_input.trim().to_string();
+    let stt_enabled = !stt_key.is_empty();
+
+    let mut secret_obj = serde_json::json!({ "DISCORD_BOT_TOKEN": token });
+    if stt_enabled {
+        secret_obj["STT_API_KEY"] = serde_json::Value::String(stt_key);
+    }
+    store_secret(&sm, &secret_name, &secret_obj.to_string()).await?;
+    eprintln!("   → Stored in Secrets Manager: {secret_name}");
+    if stt_enabled {
+        eprintln!("     Keys: DISCORD_BOT_TOKEN, STT_API_KEY\n");
+    } else {
+        eprintln!("     Keys: DISCORD_BOT_TOKEN\n");
+    }
 
     // 4. Runtime
     let runtime = prompt_select("Runtime", &["ecs", "kubernetes"].to_vec())?;
@@ -88,7 +105,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str) ->
     };
 
     // ─── Generate config.toml ──────────────────────────────────────────────
-    let config_toml = generate_config(&backend, name, namespace);
+    let config_toml = generate_config(&backend, name, namespace, stt_enabled);
 
     // ─── Upload config to S3 ───────────────────────────────────────────────
     let oab_cfg = crate::config::OabConfig::load().unwrap_or_default();
@@ -289,11 +306,37 @@ async fn list_security_groups(ec2: &Ec2Client, vpc_id: &str) -> Result<Vec<SgInf
     }).collect())
 }
 
-fn generate_config(backend: &str, name: &str, namespace: &str) -> String {
-    format!(
-        r#"[secrets.refs]
-discord_bot_token = "aws-sm://oab/{namespace}/{name}#DISCORD_BOT_TOKEN"
+fn generate_config(backend: &str, name: &str, namespace: &str, stt_enabled: bool) -> String {
+    let stt_section = if stt_enabled {
+        format!(
+            r#"[stt]
+enabled = true
+api_key = "${{secrets.stt_api_key}}"
+model = "whisper-large-v3-turbo"
+base_url = "https://api.groq.com/openai/v1"
+"#
+        )
+    } else {
+        "[stt]\nenabled = false\n".to_string()
+    };
 
+    let secrets_refs = if stt_enabled {
+        format!(
+            r#"[secrets.refs]
+discord_bot_token = "aws-sm://oab/{namespace}/{name}#DISCORD_BOT_TOKEN"
+stt_api_key = "aws-sm://oab/{namespace}/{name}#STT_API_KEY"
+"#
+        )
+    } else {
+        format!(
+            r#"[secrets.refs]
+discord_bot_token = "aws-sm://oab/{namespace}/{name}#DISCORD_BOT_TOKEN"
+"#
+        )
+    };
+
+    format!(
+        r#"{secrets_refs}
 [discord]
 bot_token = "${{secrets.discord_bot_token}}"
 allow_all_channels = true
@@ -315,11 +358,10 @@ session_ttl_hours = 1
 enabled = true
 remove_after_reply = false
 
-[stt]
-enabled = false
-
+{stt_section}
 [cron]
-usercron_enabled = false
+usercron_enabled = true
+usercron_path = "cronjob.toml"
 "#
     )
 }
