@@ -276,9 +276,47 @@ With `oabctl bootstrap`, most prerequisites are handled automatically. You only 
 
 ## How It Works
 
-1. `oabctl bootstrap` creates cluster, IAM roles, S3 bucket, security group
-2. `oabctl create` wizard generates config.toml + manifest.yaml, stores secrets, deploys
-3. `oabctl apply --sync` uploads config to S3, registers task definition, creates/updates ECS service
-4. ECS maintains desired state — restarts failed tasks, rolling deployments
-5. On startup, agent downloads config from `configFrom`, resolves secrets via `[secrets.refs]`
-6. `exec`/`cp`/`sync` use ecsctl library (ECS Exec + S3 presigned URLs)
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Developer Machine                                                       │
+│                                                                          │
+│  oabctl bootstrap ──► Creates: ECS Cluster, IAM Roles, S3, SG, Logs    │
+│                                                                          │
+│  oabctl create ─────► Wizard → config.toml + manifest.yaml (local)      │
+│       │                  │                                               │
+│       │                  └─► Secrets Manager: oab/{ns}/{name}            │
+│       │                                                                  │
+│  oabctl apply --sync                                                     │
+│       │                                                                  │
+│       ├─► S3: Upload config.toml to artifacts/{ns}/{name}/              │
+│       ├─► ECS: Register Task Definition                                  │
+│       └─► ECS: Create/Update Service                                     │
+│                                                                          │
+│  oabctl exec/cp/sync ──► ecsctl library ──► ECS Exec (SSM)             │
+└──────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  AWS Cloud                                                               │
+│                                                                          │
+│  ┌─────────────┐     ┌──────────────────────────────────────────┐       │
+│  │ S3 Bucket   │     │ ECS Cluster (oab)                        │       │
+│  │             │     │                                          │       │
+│  │ bootstrap/  │     │  ┌─────────────────────────────────┐    │       │
+│  │   state.json│     │  │ Fargate Task (agent)             │    │       │
+│  │             │     │  │                                  │    │       │
+│  │ manifests/  │     │  │  ┌────────────────────────────┐ │    │       │
+│  │   *.yaml    │     │  │  │ OpenAB Container           │ │    │       │
+│  │             │     │  │  │                            │ │    │       │
+│  │ artifacts/  │◄────┼──┼──│ 1. Download config.toml    │ │    │       │
+│  │   config.toml     │  │  │ 2. Resolve [secrets.refs]  │─┼────┼──►SM  │
+│  │             │     │  │  │ 3. Start agent             │ │    │       │
+│  └─────────────┘     │  │  └────────────────────────────┘ │    │       │
+│                       │  └─────────────────────────────────┘    │       │
+│  ┌──────────────┐    └──────────────────────────────────────────┘       │
+│  │ Secrets Mgr  │                                                        │
+│  │ oab/{ns}/{n} │    ┌───────────────┐                                  │
+│  │  BOT_TOKEN   │    │ CloudWatch    │                                  │
+│  │  STT_API_KEY │    │ /oab/agents   │                                  │
+│  └──────────────┘    └───────────────┘                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
