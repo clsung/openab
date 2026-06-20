@@ -23,7 +23,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     let image_base = BACKENDS.iter().find(|(n, _)| *n == backend).unwrap().1;
 
     // 2. Release channel
-    let channel = prompt_select("Release channel", &CHANNELS.to_vec())?;
+    let channel = prompt_select("Release channel", CHANNELS)?;
     let image = format!("{image_base}:{channel}");
     eprintln!("   → Image: {image}\n");
 
@@ -52,13 +52,13 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     }
 
     // 4. Runtime
-    let runtime = prompt_select("Runtime", &["ecs", "kubernetes"].to_vec())?;
+    let runtime = prompt_select("Runtime", &["ecs", "kubernetes"])?;
     if runtime == "kubernetes" {
         anyhow::bail!("Kubernetes runtime not yet implemented");
     }
 
     // 5. Capacity provider
-    let cap = prompt_select("Capacity provider", &["FARGATE_SPOT (cost-optimized)", "FARGATE (on-demand)"].to_vec())?;
+    let cap = prompt_select("Capacity provider", &["FARGATE_SPOT (cost-optimized)", "FARGATE (on-demand)"])?;
     let capacity_provider = if cap.starts_with("FARGATE_SPOT") { "FARGATE_SPOT" } else { "FARGATE" };
 
     // 6. VPC
@@ -102,23 +102,23 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     };
 
     // ─── Generate config.toml ──────────────────────────────────────────────
-    let config_toml = generate_config(&backend, name, namespace, stt_enabled);
+    let config_toml = generate_config(backend, name, namespace, stt_enabled);
 
     // ─── Resolve bucket for configFrom path ────────────────────────────────
     let s3 = S3Client::new(config);
     let bucket = resolve_bucket(&s3, config).await
-        .unwrap_or_else(|| format!("oab-control-plane-unknown"));
+        .unwrap_or_else(|| "oab-control-plane-unknown".to_string());
 
     let config_s3_key = format!("artifacts/{namespace}/{name}/config.toml");
     let config_from = format!("s3://{bucket}/{config_s3_key}");
 
     // ─── Save local files ──────────────────────────────────────────────────
-    let dir = format!("{name}");
+    let dir = name.to_string();
     std::fs::create_dir_all(&dir)?;
     std::fs::write(format!("{dir}/config.toml"), &config_toml)?;
 
     let subnet_ids: Vec<String> = subnets.iter().map(|s| s.id.clone()).collect();
-    let manifest_yaml = generate_manifest(name, namespace, &image, &config_from, &secret_name, capacity_provider, &subnet_ids, &sg_id);
+    let manifest_yaml = generate_manifest(name, namespace, &image, &config_from, capacity_provider, &subnet_ids, &sg_id);
     std::fs::write(format!("{dir}/manifest.yaml"), &manifest_yaml)?;
 
     // ─── Summary ───────────────────────────────────────────────────────────
@@ -296,16 +296,14 @@ async fn list_security_groups(ec2: &Ec2Client, vpc_id: &str) -> Result<Vec<SgInf
     }).collect())
 }
 
-fn generate_config(backend: &str, name: &str, namespace: &str, stt_enabled: bool) -> String {
+fn generate_config(_backend: &str, name: &str, namespace: &str, stt_enabled: bool) -> String {
     let stt_section = if stt_enabled {
-        format!(
-            r#"[stt]
+        r#"[stt]
 enabled = true
-api_key = "${{secrets.stt_api_key}}"
+api_key = "${secrets.stt_api_key}"
 model = "whisper-large-v3-turbo"
 base_url = "https://api.groq.com/openai/v1"
-"#
-        )
+"#.to_string()
     } else {
         "[stt]\nenabled = false\n".to_string()
     };
@@ -356,7 +354,7 @@ usercron_path = "cronjob.toml"
     )
 }
 
-fn generate_manifest(name: &str, namespace: &str, image: &str, config_from: &str, _secret_name: &str, cap: &str, subnets: &[String], sg: &str) -> String {
+fn generate_manifest(name: &str, namespace: &str, image: &str, config_from: &str, cap: &str, subnets: &[String], sg: &str) -> String {
     let subnets_yaml = subnets.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
     format!(
         r#"apiVersion: oab.dev/v2
@@ -380,7 +378,7 @@ spec:
     )
 }
 
-async fn resolve_bucket(s3: &S3Client, config: &aws_config::SdkConfig) -> Option<String> {
+async fn resolve_bucket(_s3: &S3Client, config: &aws_config::SdkConfig) -> Option<String> {
     let oab_cfg = crate::config::OabConfig::load().ok()?;
     if let Some(b) = oab_cfg.bucket() {
         return Some(b);
