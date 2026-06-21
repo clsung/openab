@@ -80,10 +80,10 @@ impl UnifiedGatewayAdapter {
             }
             #[cfg(feature = "teams")]
             "teams" => {
-                if let Some(ref _teams) = self.gw_state.teams {
+                if let Some(ref teams) = self.gw_state.teams {
                     openab_gateway::adapters::teams::handle_reply(
                         reply,
-                        self.gw_state.teams.as_ref().unwrap(),
+                        teams,
                         &self.gw_state.teams_service_urls,
                     )
                     .await;
