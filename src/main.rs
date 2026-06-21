@@ -19,6 +19,7 @@ use openab_core::dispatch;
 use openab_core::gateway;
 use openab_core::hooks;
 use openab_core::multibot_cache;
+#[cfg(feature = "discord")]
 use openab_core::remind;
 use openab_core::secrets;
 use openab_core::setup;
@@ -307,8 +308,7 @@ async fn main() -> anyhow::Result<()> {
     let shared_slack_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
 
     // Shared slot for Discord ShardMessenger (set in ready handler, used by ctl for agent.status)
-    let ctl_shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>> =
-        Arc::new(std::sync::OnceLock::new());
+    let ctl_shard: ctl::ShardSlot = Arc::new(std::sync::OnceLock::new());
 
     // Thread registry: thread_id → platform. Populated on message dispatch.
     let ctl_registry = ctl::new_registry();
