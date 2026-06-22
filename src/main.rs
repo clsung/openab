@@ -292,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
             s.allow_bot_messages,
             s.assistant_mode,
             multibot_cache.clone(),
+            s.streaming,
         ))
     });
     #[cfg(not(feature = "slack"))]
