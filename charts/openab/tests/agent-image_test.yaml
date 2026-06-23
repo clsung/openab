@@ -11,8 +11,8 @@ tests:
 
   - it: non-kiro agent resolves to openab:<appVersion>-<agent>
     set:
+      agents.kiro.enabled: false
       agents.claude.command: claude-agent-acp
-    documentIndex: 1
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
@@ -29,8 +29,8 @@ tests:
   - it: image.tag override applies to non-kiro agent with suffix
     set:
       image.tag: "beta"
+      agents.kiro.enabled: false
       agents.codex.command: codex-acp
-    documentIndex: 1
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
