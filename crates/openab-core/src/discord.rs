@@ -1846,7 +1846,8 @@ impl Handler {
             ).await;
 
             // Wait for the process to complete (user authorizes in browser).
-            let timeout = std::time::Duration::from_secs(15 * 60);
+            // Use 14min (not 15) to leave headroom for the Discord interaction token TTL.
+            let timeout = std::time::Duration::from_secs(14 * 60);
             match tokio::time::timeout(timeout, child.wait()).await {
                 Ok(Ok(status)) if status.success() => {
                     let _ = http.create_followup_message(

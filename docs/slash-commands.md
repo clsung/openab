@@ -170,7 +170,12 @@ Trigger the backend agent's device-flow authentication. OAB executes the command
 - No interactive stdin input required (headless-compatible)
 - Must be invoked in a **DM** with the bot (rejected in guild channels/threads for security)
 
-**Timeout:** 15 minutes. If the user doesn't authorize within that window, the process is killed and the user is prompted to run `/auth` again.
+**Timeout:** 14 minutes. If the user doesn't authorize within that window, the process is killed and the user is prompted to run `/auth` again. (Reduced from 15min to leave headroom for Discord's interaction token TTL.)
+
+**Behavior notes:**
+- Only users in the `allowed_users` list can invoke `/auth`
+- A 30-second URL-collection window waits for the auth command to print its URL. Slow-starting CLIs that take longer may show "no output".
+- Only one `/auth` flow can run at a time (single-flight). A second concurrent invocation is rejected with "already in progress".
 
 **Error cases:**
 - `OPENAB_AGENT_AUTH_COMMAND` not set → immediate error message
