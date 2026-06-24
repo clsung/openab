@@ -1687,11 +1687,7 @@ impl Handler {
         }
 
         // DM-only — auth codes are sensitive; reject if not in a DM channel.
-        let is_dm = matches!(
-            cmd.channel_id.to_channel(&ctx.http).await,
-            Ok(serenity::model::channel::Channel::Private(_))
-        );
-        if !is_dm {
+        if cmd.guild_id.is_some() {
             let response = CreateInteractionResponse::Message(
                 CreateInteractionResponseMessage::new()
                     .content("🔒 `/auth` is only available in DMs for security. Please DM me and run `/auth` there.")
@@ -1746,6 +1742,17 @@ impl Handler {
             use tokio::process::Command as TokioCommand;
             use std::sync::Arc;
 
+            // Drop guard ensures AUTH_IN_PROGRESS is cleared even on panic.
+            struct AuthGuard;
+            impl Drop for AuthGuard {
+                fn drop(&mut self) {
+                    AUTH_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = AuthGuard;
+
+            info!("/auth: starting auth command");
+
             let child = TokioCommand::new("sh")
                 .arg("-c")
                 .arg(&auth_cmd)
@@ -1756,6 +1763,7 @@ impl Handler {
             let mut child = match child {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::error!(error = %e, "/auth: failed to spawn auth command");
                     let _ = http.create_followup_message(
                         &token,
                         &CreateInteractionResponseFollowup::new()
@@ -1763,7 +1771,6 @@ impl Handler {
                             .ephemeral(true),
                         Vec::new(),
                     ).await;
-                    AUTH_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
                     return;
                 }
             };
@@ -1808,15 +1815,19 @@ impl Handler {
             // Wait for a URL to appear or 30-second timeout.
             tokio::select! {
                 _ = url_found.notified() => {
+                    info!("/auth: URL detected in output");
                     // Brief sleep to let trailing lines (code/instructions) be captured.
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                    warn!("/auth: 30s URL-collection window expired without detecting URL");
+                }
             }
 
             let collected_lines = lines.lock().unwrap().clone();
 
             if collected_lines.is_empty() {
+                warn!("/auth: no output captured, killing child process");
                 let _ = child.kill().await;
                 let _ = tokio::join!(stdout_task, stderr_task);
                 let _ = http.create_followup_message(
@@ -1826,7 +1837,6 @@ impl Handler {
                         .ephemeral(true),
                     Vec::new(),
                 ).await;
-                AUTH_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
                 return;
             }
 
@@ -1850,6 +1860,7 @@ impl Handler {
             let timeout = std::time::Duration::from_secs(14 * 60);
             match tokio::time::timeout(timeout, child.wait()).await {
                 Ok(Ok(status)) if status.success() => {
+                    info!("/auth: authentication successful");
                     let _ = http.create_followup_message(
                         &token,
                         &CreateInteractionResponseFollowup::new()
@@ -1859,6 +1870,7 @@ impl Handler {
                     ).await;
                 }
                 Ok(Ok(status)) => {
+                    warn!(%status, "/auth: authentication failed");
                     let _ = http.create_followup_message(
                         &token,
                         &CreateInteractionResponseFollowup::new()
@@ -1877,11 +1889,12 @@ impl Handler {
                     ).await;
                 }
                 Err(_) => {
+                    warn!("/auth: timed out waiting for authorization");
                     let _ = child.kill().await;
                     let _ = http.create_followup_message(
                         &token,
                         &CreateInteractionResponseFollowup::new()
-                            .content("⏰ Authentication timed out (15 min). Run `/auth` again to retry.")
+                            .content("⏰ Authentication timed out. Run `/auth` again to retry.")
                             .ephemeral(true),
                         Vec::new(),
                     ).await;
@@ -1890,7 +1903,6 @@ impl Handler {
 
             // Let background drain tasks complete.
             let _ = tokio::join!(stdout_task, stderr_task);
-            AUTH_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     }
 
