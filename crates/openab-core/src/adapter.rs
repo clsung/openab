@@ -1045,7 +1045,7 @@ impl AdapterRouter {
                                 total_tokens = ?turn_result.total_tokens,
                                 "agent returned empty turn (0 output tokens) — likely provider/model/auth failure"
                             );
-                            "⚠️ The agent did not produce a response. This usually indicates a backend configuration issue — not an intentional empty reply. Please try again later.".to_string()
+                            SILENT_FAILURE_MSG.to_string()
                         } else {
                             "_(no response)_".to_string()
                         }
@@ -1355,6 +1355,26 @@ impl ToolEntry {
 /// Maximum number of finished tool entries to show individually
 /// during streaming before collapsing into a summary line.
 const TOOL_COLLAPSE_THRESHOLD: usize = 3;
+
+// --- Empty-turn classification (pure helper, unit-testable) ---
+
+/// Message to show the consumer when a silent failure is detected.
+pub(crate) const SILENT_FAILURE_MSG: &str = "⚠️ The agent did not produce a response. This usually indicates a backend configuration issue — not an intentional empty reply. Please try again later.";
+
+/// Classify what to display when the composed body is empty.
+/// Returns the final content string for the consumer.
+pub(crate) fn classify_empty_turn(
+    response_error: Option<&str>,
+    turn_result: &TurnResult,
+) -> String {
+    if let Some(err) = response_error {
+        format!("⚠️ {err}")
+    } else if turn_result.is_silent_failure() {
+        SILENT_FAILURE_MSG.to_string()
+    } else {
+        "_(no response)_".to_string()
+    }
+}
 
 fn compose_display(
     tool_lines: &[ToolEntry],
@@ -2032,5 +2052,74 @@ mod directive_tests {
         let (directives, content) = parse_output_directives(input);
         assert_eq!(directives.reply_to, Some("456".to_string()));
         assert_eq!(content, "看看 [[這個]] 怎麼樣");
+    }
+
+    // --- classify_empty_turn: adapter-level finalization tests ---
+
+    #[test]
+    fn empty_turn_silent_failure_produces_diagnostic() {
+        let tr = TurnResult {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(0),
+            input_tokens: Some(0),
+            total_tokens: Some(0),
+        };
+        let result = classify_empty_turn(None, &tr);
+        assert_eq!(result, SILENT_FAILURE_MSG);
+    }
+
+    #[test]
+    fn empty_turn_silent_failure_nonzero_input_still_diagnostic() {
+        let tr = TurnResult {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(0),
+            input_tokens: Some(150),
+            total_tokens: Some(150),
+        };
+        let result = classify_empty_turn(None, &tr);
+        assert_eq!(result, SILENT_FAILURE_MSG);
+    }
+
+    #[test]
+    fn empty_turn_response_error_takes_precedence() {
+        let tr = TurnResult {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(0),
+            input_tokens: Some(0),
+            total_tokens: Some(0),
+        };
+        let result = classify_empty_turn(Some("Agent process died"), &tr);
+        assert_eq!(result, "⚠️ Agent process died");
+    }
+
+    #[test]
+    fn empty_turn_missing_usage_shows_no_response() {
+        let tr = TurnResult::default();
+        let result = classify_empty_turn(None, &tr);
+        assert_eq!(result, "_(no response)_");
+    }
+
+    #[test]
+    fn empty_turn_nonzero_output_shows_no_response() {
+        let tr = TurnResult {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(50),
+            input_tokens: Some(10),
+            total_tokens: Some(60),
+        };
+        let result = classify_empty_turn(None, &tr);
+        assert_eq!(result, "_(no response)_");
+    }
+
+    #[test]
+    fn empty_turn_different_stop_reason_shows_no_response() {
+        let tr = TurnResult {
+            stop_reason: Some("max_tokens".into()),
+            output_tokens: Some(0),
+            input_tokens: Some(10),
+            total_tokens: Some(10),
+        };
+        let result = classify_empty_turn(None, &tr);
+        assert_eq!(result, "_(no response)_");
     }
 }
