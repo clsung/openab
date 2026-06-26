@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use tracing::{error, warn};
 
-use crate::acp::{classify_notification, AcpEvent, ContentBlock, SessionPool};
+use crate::acp::{classify_notification, parse_turn_result, AcpEvent, ContentBlock, SessionPool, TurnResult};
 use crate::config::{ReactionsConfig, ToolDisplay};
 use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
@@ -807,6 +807,7 @@ impl AdapterRouter {
                     // messages and abandons cleanly on dead agent / hard ceiling
                     // so late responses cannot leak into the next prompt.
                     let mut response_error: Option<String> = None;
+                    let mut turn_result = TurnResult::default();
                     let prompt_start = tokio::time::Instant::now();
                     loop {
                         let notification = tokio::select! {
@@ -843,6 +844,9 @@ impl AdapterRouter {
                             }
                             if let Some(ref err) = notification.error {
                                 response_error = Some(format_coded_error(err.code, &err.message, err.data_message()));
+                            }
+                            if let Some(ref result) = notification.result {
+                                turn_result = parse_turn_result(result);
                             }
                             break;
                         }
@@ -1033,6 +1037,15 @@ impl AdapterRouter {
                     let final_content = if final_content.is_empty() {
                         if let Some(err) = response_error {
                             format!("⚠️ {err}")
+                        } else if turn_result.is_silent_failure() {
+                            warn!(
+                                stop_reason = ?turn_result.stop_reason,
+                                input_tokens = ?turn_result.input_tokens,
+                                output_tokens = ?turn_result.output_tokens,
+                                total_tokens = ?turn_result.total_tokens,
+                                "agent returned empty turn (0 output tokens) — likely provider/model/auth failure"
+                            );
+                            "⚠️ The agent did not produce a response. This usually indicates a backend configuration issue — not an intentional empty reply. Please try again later.".to_string()
                         } else {
                             "_(no response)_".to_string()
                         }
