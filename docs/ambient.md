@@ -35,7 +35,7 @@ The `instructions_file` field points to a Markdown file whose content is used as
 - **Default path:** `~/.openab/config/ambient.md`
 - **Max length:** First 2000 characters are used; content beyond that is truncated.
 - **Fallback:** If the file does not exist, the built-in default instructions are used.
-- **No restart required:** The file is read once at startup. To apply changes, restart the bot.
+- **Restart required:** The file is read once at startup. To apply changes, restart the bot.
 
 Example `~/.openab/config/ambient.md`:
 

@@ -54,10 +54,10 @@ const INSTRUCTIONS_FILE_MAX_CHARS: usize = 2000;
 const DEFAULT_AMBIENT_SYSTEM_INSTRUCTION: &str = r#"You are in ambient mode. Below is a batch of recent messages from the channel. You are passively observing the conversation.
 
 Rules:
-- If you truly have nothing to add, reply EXACTLY: [NO_REPLY]
-- Feel free to jump in when you can help, share relevant knowledge, offer suggestions, or add to the discussion
-- You can respond to interesting topics, answer questions (even if not directed at you), or provide useful context
-- Keep replies concise and natural — you are part of the conversation
+- If you have nothing valuable to add, reply EXACTLY: [NO_REPLY]
+- Only reply when you can provide meaningful help, context, or corrections
+- Do not reply to other bot messages unless directly relevant to a human's question
+- Keep replies concise and natural — you are joining an ongoing conversation, not starting one
 - Do not acknowledge that you are in ambient mode
 "#;
 
@@ -97,8 +97,12 @@ fn load_instructions(path: &str) -> String {
             info!(path = %expanded.display(), chars = truncated.len(), "ambient: loaded custom instructions");
             truncated
         }
-        Err(_) => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             debug!(path = %expanded.display(), "ambient: instructions file not found, using default");
+            DEFAULT_AMBIENT_SYSTEM_INSTRUCTION.to_string()
+        }
+        Err(e) => {
+            warn!(path = %expanded.display(), error = %e, "ambient: failed to read instructions file, using default");
             DEFAULT_AMBIENT_SYSTEM_INSTRUCTION.to_string()
         }
     }
