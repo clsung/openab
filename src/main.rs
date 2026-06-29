@@ -115,6 +115,17 @@ enum Commands {
     },
 }
 
+/// Returns true if any unified platform env var is set AND the corresponding feature is compiled in.
+/// Single source of truth — used by both startup validation and adapter init.
+fn has_unified_platform_env() -> bool {
+    (cfg!(feature = "telegram") && std::env::var("TELEGRAM_BOT_TOKEN").is_ok())
+        || (cfg!(feature = "line") && std::env::var("LINE_CHANNEL_SECRET").is_ok())
+        || (cfg!(feature = "feishu") && std::env::var("FEISHU_APP_ID").is_ok())
+        || (cfg!(feature = "wecom") && std::env::var("WECOM_CORP_ID").is_ok())
+        || (cfg!(feature = "teams") && std::env::var("TEAMS_APP_ID").is_ok())
+        || (cfg!(feature = "googlechat") && std::env::var("GOOGLE_CHAT_ENABLED").map(|v| v == "true" || v == "1").unwrap_or(false))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -189,14 +200,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     if cfg.discord.is_none() && cfg.slack.is_none() && cfg.gateway.is_none() {
-        // Unified mode: skip validation if any platform env var is set AND the feature is compiled in
-        let has_unified_adapter = (cfg!(feature = "telegram") && std::env::var("TELEGRAM_BOT_TOKEN").is_ok())
-            || (cfg!(feature = "line") && std::env::var("LINE_CHANNEL_SECRET").is_ok())
-            || (cfg!(feature = "feishu") && std::env::var("FEISHU_APP_ID").is_ok())
-            || (cfg!(feature = "wecom") && std::env::var("WECOM_CORP_ID").is_ok())
-            || (cfg!(feature = "teams") && std::env::var("TEAMS_APP_ID").is_ok())
-            || (cfg!(feature = "googlechat") && std::env::var("GOOGLE_CHAT_ENABLED").map(|v| v == "true" || v == "1").unwrap_or(false));
-        if !has_unified_adapter {
+        if !has_unified_platform_env() {
             anyhow::bail!(
                 "no adapter configured — add [discord], [slack], or [gateway] to config, or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
             );
@@ -490,17 +494,7 @@ async fn main() -> anyhow::Result<()> {
     let _unified_handle = {
         use openab_core::gateway::{GatewayEventContext, process_gateway_event};
 
-        // Check if any gateway platform env vars are configured
-        let has_telegram = std::env::var("TELEGRAM_BOT_TOKEN").is_ok();
-        let has_line = std::env::var("LINE_CHANNEL_SECRET").is_ok();
-        let has_feishu = std::env::var("FEISHU_APP_ID").is_ok();
-        let has_googlechat = std::env::var("GOOGLE_CHAT_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-        let has_wecom = std::env::var("WECOM_CORP_ID").is_ok();
-        let has_teams = std::env::var("TEAMS_APP_ID").is_ok();
-
-        if has_telegram || has_line || has_feishu || has_googlechat || has_wecom || has_teams {
+        if has_unified_platform_env() {
             let listen_addr = std::env::var("GATEWAY_LISTEN")
                 .unwrap_or_else(|_| "0.0.0.0:8080".into());
 
@@ -969,5 +963,58 @@ mod tests {
     fn cli_setup_subcommand() {
         let cli = Cli::try_parse_from(["openab", "setup"]).unwrap();
         assert!(matches!(cli.command.unwrap(), Commands::Setup { .. }));
+    }
+
+    #[test]
+    fn has_unified_platform_env_returns_false_when_no_env_vars() {
+        // Clear all platform env vars to ensure clean state
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        std::env::remove_var("LINE_CHANNEL_SECRET");
+        std::env::remove_var("FEISHU_APP_ID");
+        std::env::remove_var("WECOM_CORP_ID");
+        std::env::remove_var("TEAMS_APP_ID");
+        std::env::remove_var("GOOGLE_CHAT_ENABLED");
+        assert!(!has_unified_platform_env());
+    }
+
+    #[test]
+    fn has_unified_platform_env_detects_google_chat_true() {
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        std::env::remove_var("LINE_CHANNEL_SECRET");
+        std::env::remove_var("FEISHU_APP_ID");
+        std::env::remove_var("WECOM_CORP_ID");
+        std::env::remove_var("TEAMS_APP_ID");
+        std::env::set_var("GOOGLE_CHAT_ENABLED", "true");
+        let result = has_unified_platform_env();
+        std::env::remove_var("GOOGLE_CHAT_ENABLED");
+        // Only true if googlechat feature is compiled in
+        assert_eq!(result, cfg!(feature = "googlechat"));
+    }
+
+    #[test]
+    fn has_unified_platform_env_ignores_google_chat_invalid_value() {
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        std::env::remove_var("LINE_CHANNEL_SECRET");
+        std::env::remove_var("FEISHU_APP_ID");
+        std::env::remove_var("WECOM_CORP_ID");
+        std::env::remove_var("TEAMS_APP_ID");
+        std::env::set_var("GOOGLE_CHAT_ENABLED", "yes");
+        let result = has_unified_platform_env();
+        std::env::remove_var("GOOGLE_CHAT_ENABLED");
+        assert!(!result);
+    }
+
+    #[test]
+    fn has_unified_platform_env_detects_telegram_token() {
+        std::env::remove_var("LINE_CHANNEL_SECRET");
+        std::env::remove_var("FEISHU_APP_ID");
+        std::env::remove_var("WECOM_CORP_ID");
+        std::env::remove_var("TEAMS_APP_ID");
+        std::env::remove_var("GOOGLE_CHAT_ENABLED");
+        std::env::set_var("TELEGRAM_BOT_TOKEN", "test-token");
+        let result = has_unified_platform_env();
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        // Only true if telegram feature is compiled in
+        assert_eq!(result, cfg!(feature = "telegram"));
     }
 }
