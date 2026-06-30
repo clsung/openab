@@ -93,6 +93,20 @@ webhook_path        = "/webhook/telegram"
 
 > **Tip**: You can run a pure config-only deployment — no `TELEGRAM_*` env vars needed. Just set `bot_token = "your-token"` directly in `[telegram]` and the adapter will activate from config alone.
 
+> **Security hardening**: For production deployments, we highly recommend using `aws-sm://` secret references instead of hardcoding tokens in `config.toml`. This keeps secrets out of version control and enables rotation and audit:
+>
+> ```toml
+> [secrets.refs]
+> tg_token  = "aws-sm://openab/prod#telegram_bot_token"
+> tg_secret = "aws-sm://openab/prod#telegram_secret_token"
+>
+> [telegram]
+> bot_token    = "${secrets.tg_token}"
+> secret_token = "${secrets.tg_secret}"
+> ```
+>
+> See [secrets-management.md](secrets-management.md) for full documentation.
+
 
 ### Set the Webhook
 
