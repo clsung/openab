@@ -200,10 +200,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     if cfg.discord.is_none() && cfg.slack.is_none() && cfg.gateway.is_none()
+        && cfg.telegram.is_none()
         && !has_unified_platform_env()
     {
         anyhow::bail!(
-            "no adapter configured — add [discord], [slack], or [gateway] to config, or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
+            "no adapter configured — add [discord], [slack], [telegram], or [gateway] to config, or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
         );
     }
 
@@ -497,7 +498,7 @@ async fn main() -> anyhow::Result<()> {
     let _unified_handle = {
         use openab_core::gateway::{GatewayEventContext, process_gateway_event};
 
-        if has_unified_platform_env() {
+        if has_unified_platform_env() || cfg.telegram.is_some() {
             let listen_addr = std::env::var("GATEWAY_LISTEN")
                 .unwrap_or_else(|_| "0.0.0.0:8080".into());
 

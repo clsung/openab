@@ -1510,7 +1510,10 @@ mod tests {
     #[test]
     fn telegram_config_value_wins_over_env() {
         // Config values are authoritative regardless of env (the `.or_else`
-        // env fallback only fires when the field is None).
+        // env fallback only fires when the field is None/empty).
+        // NOTE: This test only sets a single env var that the config value
+        // overrides — it does not race with the env-fallback test because the
+        // assertion does not depend on the env value being read.
         std::env::set_var("TELEGRAM_BOT_TOKEN", "env-token");
         let cfg = TelegramConfig {
             bot_token: Some("cfg-token".into()),
@@ -1580,6 +1583,24 @@ mod tests {
         std::env::set_var("TELEGRAM_STREAMING", "false");
         assert_eq!(TelegramConfig::default().resolve().streaming, Some(false));
 
+        // Empty-string expansion edge case: when `${}` expands to "" (env var
+        // unset at parse time), resolve() must treat it as absent and fall
+        // through to the TELEGRAM_* env var fallback — not hold `Some("")`.
+        std::env::set_var("TELEGRAM_BOT_TOKEN", "real-token");
+        std::env::set_var("TELEGRAM_SECRET_TOKEN", "real-secret");
+        std::env::remove_var("TELEGRAM_WEBHOOK_PATH");
+
+        let cfg = TelegramConfig {
+            bot_token: Some("".into()),       // simulates ${UNSET_VAR} → ""
+            secret_token: Some("".into()),
+            webhook_path: Some("".into()),
+            ..Default::default()
+        };
+        let r = cfg.resolve();
+        assert_eq!(r.bot_token.as_deref(), Some("real-token"));
+        assert_eq!(r.secret_token.as_deref(), Some("real-secret"));
+        assert_eq!(r.webhook_path, "/webhook/telegram"); // env not set → default
+
         for k in [
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_SECRET_TOKEN",
@@ -1614,30 +1635,6 @@ webhook_path = "/hook/tg"
         assert_eq!(tg.rich_messages, Some(false));
         assert_eq!(tg.streaming, Some(true));
         assert_eq!(tg.webhook_path.as_deref(), Some("/hook/tg"));
-    }
-
-    #[test]
-    fn telegram_empty_string_falls_through_to_env() {
-        // When `${}` expansion produces an empty string (env var unset at parse
-        // time), resolve() must treat it as absent and fall through to the
-        // TELEGRAM_* env var fallback — not hold `Some("")`.
-        std::env::set_var("TELEGRAM_BOT_TOKEN", "real-token");
-        std::env::set_var("TELEGRAM_SECRET_TOKEN", "real-secret");
-
-        let cfg = TelegramConfig {
-            bot_token: Some("".into()),       // simulates ${UNSET_VAR} → ""
-            secret_token: Some("".into()),
-            webhook_path: Some("".into()),
-            ..Default::default()
-        };
-        let r = cfg.resolve();
-        // Empty strings filtered out → env fallback fires
-        assert_eq!(r.bot_token.as_deref(), Some("real-token"));
-        assert_eq!(r.secret_token.as_deref(), Some("real-secret"));
-        assert_eq!(r.webhook_path, "/webhook/telegram"); // env not set → default
-
-        std::env::remove_var("TELEGRAM_BOT_TOKEN");
-        std::env::remove_var("TELEGRAM_SECRET_TOKEN");
     }
 
     #[test]
