@@ -74,8 +74,8 @@ API Gateway HTTP API and uses Cloud Map for service discovery instead of hardcod
           │  AWS Cloud Map        │  ~$0 (private DNS)
           │  namespace: oab       │
           │  service: your-bot    │
-          │  → DNS A record       │
-          │    resolves to task IP │
+          │  → DNS SRV record     │
+          │    resolves to IP:port │
           └───────────┬───────────┘
                       │
                       ▼
@@ -94,10 +94,12 @@ API Gateway HTTP API and uses Cloud Map for service discovery instead of hardcod
 - The task's security group
 - AWS CLI or Console access
 
-> **DNS record type: use A, not SRV**
-> API Gateway HTTP API integration resolves DNS A records — SRV records do **not** work
-> for VPC Link targets. Always use `{Type="A"}` in your Cloud Map service configuration.
-> The port (`:8080`) is specified in the integration URI, not the DNS record.
+> **DNS record type: use SRV, not A**
+> API Gateway HTTP API VPC Link integrations require the Cloud Map service **ARN**
+> (not an `http://` URL) as the integration URI. The port comes from the **SRV** record —
+> A records do **not** carry port information and will fail with
+> `BadRequestException: integration uri should be a valid Cloud Map service ARN`.
+> Use `{Type="SRV"}` in your Cloud Map service configuration.
 
 ### Step-by-Step
 
@@ -110,12 +112,13 @@ aws servicediscovery create-private-dns-namespace \
   --vpc vpc-abc123 \
   --region us-east-1
 
-# Service with DNS A record (auto-registers task IP)
+# Service with DNS SRV record (auto-registers task IP + port)
 aws servicediscovery create-service \
   --name your-bot \
   --namespace-id ns-xxx \
-  --dns-config 'NamespaceId="ns-xxx",DnsRecords=[{Type="A",TTL="60"}]' \
-  --region us-east-1
+  --dns-config 'NamespaceId="ns-xxx",DnsRecords=[{Type="SRV",TTL="60"}]' \
+  --region us-east-1 \
+  --query 'Service.Id' --output text  # save this as SERVICE_ID
 ```
 
 #### 2. Enable Service Discovery on Your ECS Service
@@ -131,7 +134,7 @@ aws ecs delete-service --cluster oab --service your-bot --region us-east-1
 aws ecs create-service \
   --cluster oab \
   --service-name your-bot \
-  --task-definition your-bot:latest \
+  --task-definition your-bot \
   --desired-count 0 \
   --launch-type FARGATE \
   --network-configuration \
@@ -143,9 +146,9 @@ aws ecs create-service \
 aws ecs update-service --cluster oab --service your-bot --desired-count 1 --region us-east-1
 ```
 
-When the task starts, ECS auto-registers its private IP as the DNS A record for
-`your-bot.oab`. Other services in the same VPC resolve this name to reach the task on
-`:8080`.
+When the task starts, ECS auto-registers its private IP and port as the DNS SRV record
+for `your-bot.oab`. The SRV record carries both address and port, which the VPC Link
+uses to route traffic.
 
 > **ECS task-def naming**: Use the family name (resolves to latest ACTIVE revision)
 > or `family:revision` (e.g., `your-bot:1`). ECS does not support Docker-style
@@ -174,13 +177,19 @@ API_ID=$(aws apigatewayv2 create-api \
   --region us-east-1 \
   --query 'ApiId' --output text)
 
-# Create the integration FIRST: VPC Link → Cloud Map service endpoint
-# Endpoint = your-bot.oab:8080 (the Cloud Map DNS name)
+# Get the Cloud Map service ARN (needed for the integration URI)
+SERVICE_ARN=$(aws servicediscovery get-service \
+  --id $SERVICE_ID \
+  --region us-east-1 \
+  --query 'Service.Arn' --output text)
+
+# Create the integration FIRST: VPC Link → Cloud Map service ARN
+# The integration URI must be the Cloud Map service ARN (not an http:// URL)
 INTEGRATION_ID=$(aws apigatewayv2 create-integration \
   --api-id $API_ID \
   --integration-type HTTP_PROXY \
   --integration-method POST \
-  --integration-uri "http://your-bot.oab:8080" \
+  --integration-uri "$SERVICE_ARN" \
   --connection-type VPC_LINK \
   --connection-id $VPC_LINK_ID \
   --payload-format-version "1.0" \
@@ -216,13 +225,14 @@ https://{api-id}.execute-api.us-east-1.amazonaws.com/prod/webhook/line
 ```
 
 > **Path passthrough is automatic**: API Gateway HTTP API appends the route path to the
-> integration URI. The route `POST /webhook/telegram` combined with integration URI
-> `http://your-bot.oab:8080` results in requests hitting
-> `http://your-bot.oab:8080/webhook/telegram` on the container. No path rewriting
-> needed.
+> integration target. The route `POST /webhook/telegram` results in
+> `POST /webhook/telegram` hitting the container. No path rewriting needed.
+>
+> When the Cloud Map service is registered via ECS service discovery, the SRV record
+> carries the container port — API Gateway does not need to specify it separately.
 
 This URL **never changes** — even when tasks restart and get new private IPs, Cloud Map
-auto-updates the DNS record and the VPC Link resolves the new IP transparently.
+auto-updates the DNS SRV record and the VPC Link resolves the new IP transparently.
 
 #### 5. Security Group: Inbound Rules
 
