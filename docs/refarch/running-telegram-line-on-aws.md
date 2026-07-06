@@ -36,12 +36,12 @@ traffic to your Fargate task's `:8080` without paying for an ALB.**
 | 2 | **ALB + ECS Fargate** | ~$20+ | Health checks, auto-scaling, enterprise |
 | 3 | **Cloudflare Tunnel sidecar** | ~$5–10 | Already have Cloudflare, simplest setup |
 
-> **Version note (callout)**
-> OpenAB beta.5+ supports **unified webhook mode** — set `TELEGRAM_BOT_TOKEN` or
-> `LINE_CHANNEL_SECRET` + `LINE_CHANNEL_ACCESS_TOKEN` as env vars directly on your bot
-> container, no separate gateway service needed. The infra paths below work identically
-> from beta.2 through beta.6. The only difference: beta.2 required a standalone gateway
-> service + `[gateway]` config block; beta.5+ does not.
+> **Version note**
+> OpenAB v0.9.0-beta.4+ ships **unified webhook mode** by default — set
+> `TELEGRAM_BOT_TOKEN` or `LINE_CHANNEL_SECRET` + `LINE_CHANNEL_ACCESS_TOKEN`
+> as env vars directly on your bot container, no separate gateway service
+> needed. The infra paths below work the same regardless of how the platform
+> adapter is wired in; only the deployment shape changes.
 
 ---
 
@@ -264,8 +264,16 @@ The biggest pitfall when moving from Discord-only to Telegram/LINE.
 #### 6. Set Webhook URLs
 
 **Telegram (BotFather / setWebhook):**
-```
-https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://{api-id}.execute-api.us-east-1.amazonaws.com/prod/webhook/telegram
+
+Generate a random webhook secret first, then use the same value for both the env
+var and the `secret_token` query parameter — Telegram echoes it back as the
+`X-Telegram-Bot-Api-Secret-Token` header on every webhook, and OpenAB rejects
+requests whose header doesn't match (see the **Security** callout in §7 below).
+
+```bash
+TELEGRAM_SECRET_TOKEN="$(openssl rand -hex 32)"
+
+curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://{api-id}.execute-api.us-east-1.amazonaws.com/prod/webhook/telegram&secret_token=${TELEGRAM_SECRET_TOKEN}"
 ```
 
 **LINE (LINE Developers Console):**
@@ -275,11 +283,25 @@ Webhook URL: https://{api-id}.execute-api.us-east-1.amazonaws.com/prod/webhook/l
 
 #### 7. OpenAB Environment Variables
 
-```bash
-# Telegram
-TELEGRAM_BOT_TOKEN=123:abc
+> **Security: webhook signature validation**
+> Exposing `:8080` to the public internet means anyone who discovers your webhook
+> URL can POST forged events. Both platforms ship built-in defenses, but they
+> require different config:
+>
+> - **LINE**: OpenAB automatically verifies the `X-Line-Signature` header using
+>   `LINE_CHANNEL_SECRET` (HMAC-SHA256). No extra config needed — just set the
+>   env var.
+> - **Telegram**: Set `TELEGRAM_SECRET_TOKEN` (1–256 chars, alphanumeric + `-_`).
+>   Telegram sends it back as `X-Telegram-Bot-Api-Secret-Token` on every webhook;
+>   OpenAB rejects requests whose header doesn't match. The same value **must**
+>   be passed as `secret_token` to the `setWebhook` call above.
 
-# LINE
+```bash
+# Telegram (secret_token must match the setWebhook call in §6)
+TELEGRAM_BOT_TOKEN=123:abc
+TELEGRAM_SECRET_TOKEN="$(openssl rand -hex 32)"
+
+# LINE (LINE_CHANNEL_SECRET is used for automatic webhook signature verification)
 LINE_CHANNEL_SECRET=xxx
 LINE_CHANNEL_ACCESS_TOKEN=yyy
 
@@ -287,9 +309,9 @@ LINE_CHANNEL_ACCESS_TOKEN=yyy
 DISCORD_BOT_TOKEN=zzz
 ```
 
-With unified webhook mode (beta.5+), the OpenAB binary auto-detects which env vars are
-set and starts the corresponding platform adapters. No `[gateway]` config block needed
-for Telegram/LINE.
+With unified webhook mode (v0.9.0-beta.4+), the OpenAB binary auto-detects which
+env vars are set and starts the corresponding platform adapters. No `[gateway]`
+config block needed for Telegram/LINE.
 
 ### Cost Breakdown
 
@@ -466,6 +488,7 @@ aws secretsmanager create-secret \
       "portMappings": [{"containerPort": 8080}],
       "secrets": [
         {"name": "TELEGRAM_BOT_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456:secret:openab/telegram-bot-token:token::"},
+        {"name": "TELEGRAM_SECRET_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456:secret:openab/telegram-bot-token:TELEGRAM_SECRET_TOKEN::"},
         {"name": "LINE_CHANNEL_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456:secret:openab/line-shared:LINE_CHANNEL_SECRET::"},
         {"name": "LINE_CHANNEL_ACCESS_TOKEN", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456:secret:openab/line-shared:LINE_CHANNEL_ACCESS_TOKEN::"}
       ],
@@ -535,6 +558,7 @@ The binary auto-detects which env vars are present and starts each platform adap
 |----------------|---------|-------------|
 | `DISCORD_BOT_TOKEN` | Discord | (outbound WS, no path) |
 | `TELEGRAM_BOT_TOKEN` | Telegram | `/webhook/telegram` |
+| `TELEGRAM_SECRET_TOKEN` | (Telegram only) | **Recommended.** Verifies `X-Telegram-Bot-Api-Secret-Token` on inbound webhooks; must match the `secret_token` passed to `setWebhook`. |
 | `LINE_CHANNEL_SECRET` + `LINE_CHANNEL_ACCESS_TOKEN` | LINE | `/webhook/line` |
 
 **API Gateway routing**: Add one route per platform, all pointing to the same VPC Link:
