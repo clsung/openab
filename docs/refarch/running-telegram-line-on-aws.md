@@ -50,10 +50,28 @@ traffic to your Fargate task's `:8080` without paying for an ALB.**
 This is the cheapest AWS-native path. It replaces a $16+/month ALB with a ~$1/month
 API Gateway HTTP API and uses Cloud Map for service discovery instead of hardcoded IPs.
 
-> **Automation tip**: The `oabctl` operator (see [`operator/README.md`](../../operator/README.md))
-> automates this exact Option 1 setup — API Gateway + VPC Link + Cloud Map +
-> security group — via a declarative `spec.ingress` block. Once you understand the
-> manual steps below, consider using `oabctl apply` for production deployments.
+> **✅ Recommended: use `oabctl`** — one `oabctl apply -f` command provisions this
+> entire Option 1 stack (Cloud Map → VPC Link → API Gateway → routes → stage) in
+> ~2.5 minutes, replacing all 7 manual steps below. Tested and verified on
+> `us-east-1` (2026-07-07).
+>
+> ```bash
+> # Minimal manifest (save as bot.yaml, then oabctl apply -f bot.yaml):
+> spec:
+>   ingress:
+>     type: apigateway
+>     paths:
+>       - /webhook/telegram
+> ```
+>
+> See [`docs/oabctl.md`](../oabctl.md#ingress--inbound-webhooks-telegram--line)
+> for the full ingress reference. Known pitfalls:
+> - `us-east-1e` (use1-az3) does **not** support API Gateway VPC Link — avoid
+>   subnets in that AZ.
+> - `configFrom` (S3 config path) is required even for infra-only testing.
+>
+> The manual CLI steps below are preserved for readers who want to understand
+> the underlying AWS plumbing or who are not using `oabctl`.
 
 ### Architecture Diagram
 
