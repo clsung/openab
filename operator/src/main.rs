@@ -142,7 +142,7 @@ enum Commands {
 enum ScheduleAction {
     /// Create a recurring scaling schedule
     Create {
-        /// Agent name or ecsctl alias
+        /// Agent name (OAB service)
         alias: String,
         /// Desired task count (0–100)
         #[arg(value_parser = clap::value_parser!(i32).range(0..=100))]
