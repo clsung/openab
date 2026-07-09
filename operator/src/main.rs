@@ -144,7 +144,7 @@ enum ScheduleAction {
     Create {
         /// Agent name or ecsctl alias
         alias: String,
-        /// Desired task count (0 or 1)
+        /// Desired task count (0–100)
         #[arg(value_parser = clap::value_parser!(i32).range(0..=100))]
         size: i32,
         /// Schedule expression: cron(...), rate(...), or at(...)
