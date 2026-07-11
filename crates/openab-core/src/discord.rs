@@ -213,6 +213,9 @@ pub struct Handler {
     pub allowed_users: HashSet<u64>,
     pub stt_config: SttConfig,
     pub adapter: OnceLock<Arc<dyn ChatAdapter>>,
+    /// Optional filestore for uploading large text file attachments.
+    #[cfg(feature = "filestore")]
+    pub filestore: Option<Arc<crate::filestore::Filestore>>,
     pub allow_bot_messages: AllowBots,
     pub trusted_bot_ids: HashSet<u64>,
     pub allow_user_messages: AllowUsers,
@@ -890,18 +893,35 @@ impl EventHandler for Handler {
                 }
                 // Pre-check with Discord-reported size (fast path, avoids unnecessary download).
                 // Running total uses actual downloaded bytes for accurate accounting.
-                if text_file_bytes + u64::from(attachment.size) > TEXT_TOTAL_CAP {
+                // When filestore is configured, skip the cap for files > 512KB (they'll
+                // be uploaded to S3, not inlined).
+                let attachment_size = u64::from(attachment.size);
+                #[cfg(feature = "filestore")]
+                let skip_cap = self.filestore.is_some() && attachment_size > 512 * 1024;
+                #[cfg(not(feature = "filestore"))]
+                let skip_cap = false;
+                if !skip_cap && text_file_bytes + attachment_size > TEXT_TOTAL_CAP {
                     tracing::warn!(filename = %attachment.filename, total = text_file_bytes, "text attachments total exceeds 1MB cap, skipping remaining");
                     continue;
                 }
-                if let Some((block, actual_bytes)) = media::download_and_read_text_file(
+                #[cfg(feature = "filestore")]
+                let text_file_result = media::download_and_read_text_file(
                     &attachment.url,
                     &attachment.filename,
-                    u64::from(attachment.size),
+                    attachment_size,
+                    None,
+                    self.filestore.as_deref(),
+                )
+                .await;
+                #[cfg(not(feature = "filestore"))]
+                let text_file_result = media::download_and_read_text_file(
+                    &attachment.url,
+                    &attachment.filename,
+                    attachment_size,
                     None,
                 )
-                .await
-                {
+                .await;
+                if let Some((block, actual_bytes)) = text_file_result {
                     text_file_bytes += actual_bytes;
                     text_file_count += 1;
                     debug!(filename = %attachment.filename, "adding text file attachment");
@@ -942,6 +962,26 @@ impl EventHandler for Handler {
                                 u64::from(attachment.size),
                                 &attachment.url,
                             ));
+                        }
+                        // For all other unsupported formats (PDF, ZIP, binary, etc.):
+                        // upload to filestore if available so the agent gets a presigned URL.
+                        #[cfg(feature = "filestore")]
+                        if !media::is_video_file(
+                            &attachment.filename,
+                            attachment.content_type.as_deref(),
+                        ) {
+                            if let Some(ref fs) = self.filestore {
+                                if let Some((block, _)) = media::download_and_upload_any_file(
+                                    &attachment.url,
+                                    &attachment.filename,
+                                    u64::from(attachment.size),
+                                    attachment.content_type.as_deref(),
+                                    None,
+                                    fs,
+                                ).await {
+                                    extra_blocks.push(block);
+                                }
+                            }
                         }
                     }
                     Err(e) => {

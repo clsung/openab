@@ -767,6 +767,7 @@ pub async fn run_gateway_adapter(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     dispatcher: Arc<crate::dispatch::Dispatcher>,
     router: Arc<crate::adapter::AdapterRouter>,
+    #[cfg(feature = "filestore")] filestore: Option<Arc<crate::filestore::Filestore>>,
 ) -> Result<()> {
     let platform: &'static str = Box::leak(params.platform.into_boxed_str());
 
@@ -996,10 +997,46 @@ pub async fn run_gateway_adapter(
                                             }
                                             "text_file" => {
                                                 if let Ok(bytes) = bytes_result {
-                                                    let text = String::from_utf8_lossy(&bytes);
-                                                    extra_blocks.push(ContentBlock::Text {
-                                                        text: format!("```{}\n{}\n```", att.filename, text),
-                                                    });
+                                                    const INLINE_LIMIT: u64 = 512 * 1024;
+                                                    let size = bytes.len() as u64;
+                                                    if size <= INLINE_LIMIT {
+                                                        let text = String::from_utf8_lossy(&bytes);
+                                                        extra_blocks.push(ContentBlock::Text {
+                                                            text: format!("```{}\n{}\n```", att.filename, text),
+                                                        });
+                                                    } else {
+                                                        // Large file — upload to filestore if available
+                                                        #[cfg(feature = "filestore")]
+                                                        if let Some(ref fs) = filestore {
+                                                            if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
+                                                                extra_blocks.push(block);
+                                                            } else {
+                                                                // Upload refused (size cap) — emit degraded hint, don't inline oversized body
+                                                                let size_kb = bytes.len() / 1024;
+                                                                tracing::warn!(filename = %att.filename, size = bytes.len(), "filestore upload refused; emitting degraded hint");
+                                                                extra_blocks.push(ContentBlock::Text {
+                                                                    text: format!(
+                                                                        "[File: {}]\nThis file ({} KB) exceeds the configured upload limit and could not be stored.",
+                                                                        att.filename, size_kb
+                                                                    ),
+                                                                });
+                                                            }
+                                                        } else {
+                                                            // No filestore configured — fall back to inline (original behavior)
+                                                            let text = String::from_utf8_lossy(&bytes);
+                                                            extra_blocks.push(ContentBlock::Text {
+                                                                text: format!("```{}\n{}\n```", att.filename, text),
+                                                            });
+                                                        }
+                                                        #[cfg(not(feature = "filestore"))]
+                                                        {
+                                                            // Feature not compiled — inline as before
+                                                            let text = String::from_utf8_lossy(&bytes);
+                                                            extra_blocks.push(ContentBlock::Text {
+                                                                text: format!("```{}\n{}\n```", att.filename, text),
+                                                            });
+                                                        }
+                                                    }
                                                 }
                                             }
                                             "audio" if stt_config.enabled => {
@@ -1182,6 +1219,8 @@ pub struct GatewayEventContext {
     pub trusted_bot_ids: HashSet<String>,
     pub bot_username: Option<String>,
     pub stt_config: crate::config::SttConfig,
+    #[cfg(feature = "filestore")]
+    pub filestore: Option<Arc<crate::filestore::Filestore>>,
 }
 
 /// Process a single gateway event JSON string and submit to the dispatcher.
@@ -1377,10 +1416,46 @@ pub async fn process_gateway_event(
             "text_file" => {
                 match bytes_result {
                     Ok(bytes) => {
-                        let text = String::from_utf8_lossy(&bytes);
-                        extra_blocks.push(ContentBlock::Text {
-                            text: format!("```{}\n{}\n```", att.filename, text),
-                        });
+                        const INLINE_LIMIT: u64 = 512 * 1024;
+                        let size = bytes.len() as u64;
+                        if size <= INLINE_LIMIT {
+                            let text = String::from_utf8_lossy(&bytes);
+                            extra_blocks.push(ContentBlock::Text {
+                                text: format!("```{}\n{}\n```", att.filename, text),
+                            });
+                        } else {
+                            // Large file — upload to filestore if available
+                            #[cfg(feature = "filestore")]
+                            if let Some(ref fs) = ctx.filestore {
+                                if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
+                                    extra_blocks.push(block);
+                                } else {
+                                    // Upload refused (size cap) — emit degraded hint, don't inline oversized body
+                                    let size_kb = bytes.len() / 1024;
+                                    tracing::warn!(filename = %att.filename, size = bytes.len(), "filestore upload refused; emitting degraded hint");
+                                    extra_blocks.push(ContentBlock::Text {
+                                        text: format!(
+                                            "[File: {}]\nThis file ({} KB) exceeds the configured upload limit and could not be stored.",
+                                            att.filename, size_kb
+                                        ),
+                                    });
+                                }
+                            } else {
+                                // No filestore configured — fall back to inline (original behavior)
+                                let text = String::from_utf8_lossy(&bytes);
+                                extra_blocks.push(ContentBlock::Text {
+                                    text: format!("```{}\n{}\n```", att.filename, text),
+                                });
+                            }
+                            #[cfg(not(feature = "filestore"))]
+                            {
+                                // Feature not compiled — inline as before
+                                let text = String::from_utf8_lossy(&bytes);
+                                extra_blocks.push(ContentBlock::Text {
+                                    text: format!("```{}\n{}\n```", att.filename, text),
+                                });
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(filename = %att.filename, error = %e, "gateway text_file read failed");

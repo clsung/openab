@@ -429,6 +429,25 @@ async fn main() -> anyhow::Result<()> {
         .join("threads.json");
     let multibot_cache = multibot_cache::MultibotCache::load(multibot_cache_path);
 
+    // Initialize filestore (for uploading large text file attachments to S3/R2).
+    #[cfg(feature = "filestore")]
+    let filestore: Option<Arc<openab_core::filestore::Filestore>> = if let Some(ref fs_cfg) =
+        cfg.filestore
+    {
+        info!(
+            bucket = %fs_cfg.bucket,
+            region = %fs_cfg.region,
+            prefix = %fs_cfg.prefix,
+            presigned_ttl = fs_cfg.presigned_ttl,
+            "filestore enabled"
+        );
+        Some(Arc::new(
+            openab_core::filestore::Filestore::new(fs_cfg).await,
+        ))
+    } else {
+        None
+    };
+
     #[cfg(feature = "slack")]
     let shared_slack_adapter: Option<Arc<slack::SlackAdapter>> = cfg.slack.as_ref().map(|s| {
         Arc::new(slack::SlackAdapter::new(
@@ -528,6 +547,8 @@ async fn main() -> anyhow::Result<()> {
         dispatchers.lock().unwrap().push(slack_dispatcher.clone());
         let slack_allowed_users: std::collections::HashSet<String> =
             slack_cfg.allowed_users.into_iter().collect();
+        #[cfg(feature = "filestore")]
+        let slack_filestore = filestore.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = slack::run_slack_adapter(
                 adapter,
@@ -543,6 +564,8 @@ async fn main() -> anyhow::Result<()> {
                 stt,
                 slack_shutdown_rx,
                 slack_dispatcher,
+                #[cfg(feature = "filestore")]
+                slack_filestore,
             )
             .await
             {
@@ -595,9 +618,18 @@ async fn main() -> anyhow::Result<()> {
             stt: cfg.stt.clone(),
         };
         let gw_router = router.clone();
+        #[cfg(feature = "filestore")]
+        let gw_filestore = filestore.clone();
         Some(tokio::spawn(async move {
             if let Err(e) =
-                gateway::run_gateway_adapter(params, shutdown_rx, gw_dispatcher, gw_router).await
+                gateway::run_gateway_adapter(
+                    params,
+                    shutdown_rx,
+                    gw_dispatcher,
+                    gw_router,
+                    #[cfg(feature = "filestore")]
+                    gw_filestore,
+                ).await
             {
                 error!("gateway adapter error: {e}");
             }
@@ -642,6 +674,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Build gateway AppState from env vars (shared factory with standalone gateway)
             let mut gw_state_inner = openab_gateway::AppState::from_env(event_tx.clone(), None);
+
 
             // First-class `[telegram]` config overrides env-derived values
             // (config-authoritative + ${} expansion + TELEGRAM_* env fallback).
@@ -796,6 +829,8 @@ async fn main() -> anyhow::Result<()> {
                 trusted_bot_ids: gw_trusted_bot_ids,
                 bot_username: gw_bot_username,
                 stt_config: cfg.stt.clone(),
+                #[cfg(feature = "filestore")]
+                filestore: filestore.clone(),
             });
 
             // Spawn the event bridge (event_tx → process_gateway_event)
@@ -969,6 +1004,8 @@ async fn main() -> anyhow::Result<()> {
             allowed_users,
             stt_config: cfg.stt.clone(),
             adapter: std::sync::OnceLock::new(),
+            #[cfg(feature = "filestore")]
+            filestore: filestore.clone(),
             allow_bot_messages: discord_cfg.allow_bot_messages,
             trusted_bot_ids,
             allow_user_messages: discord_cfg.allow_user_messages,
