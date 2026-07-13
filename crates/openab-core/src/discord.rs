@@ -1,4 +1,4 @@
-use crate::acp::protocol::ConfigOption;
+use crate::acp::protocol::{ConfigOption, UsageReport};
 use crate::acp::ContentBlock;
 use crate::adapter::{AdapterRouter, ChannelRef, ChatAdapter, MessageRef, SenderContext};
 use crate::bot_turns::{BotTurnTracker, TurnAction, TurnSeverity, BOT_TURN_LIMIT_WARNING_PREFIX};
@@ -11,9 +11,9 @@ use crate::trust::l3_gate_applies;
 use async_trait::async_trait;
 use serenity::builder::{
     CreateActionRow, CreateAttachment, CreateButton, CreateCommand, CreateCommandOption,
-    CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
-    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditChannel,
-    EditMessage, GetMessages,
+    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, CreateThread, EditChannel, EditMessage, GetMessages,
 };
 use serenity::http::Http;
 use serenity::model::application::ButtonStyle;
@@ -1398,6 +1398,8 @@ impl EventHandler for Handler {
                 ).required(true)),
             CreateCommand::new("auth")
                 .description("Authenticate the backend agent (device flow)"),
+            CreateCommand::new("usage")
+                .description("Show backend account usage and billing information"),
             CreateCommand::new("export-thread")
                 .description("Download this thread as a text file")
                 .add_option(CreateCommandOption::new(
@@ -1488,6 +1490,9 @@ impl EventHandler for Handler {
             }
             Interaction::Command(cmd) if cmd.data.name == "auth" => {
                 self.handle_auth_command(&ctx, &cmd).await;
+            }
+            Interaction::Command(cmd) if cmd.data.name == "usage" => {
+                self.handle_usage_command(&ctx, &cmd).await;
             }
             Interaction::Component(comp) if comp.data.custom_id.starts_with("acp_config_") => {
                 self.handle_config_select(&ctx, &comp).await;
@@ -1652,6 +1657,51 @@ impl Handler {
 
         if let Err(e) = cmd.create_response(&ctx.http, response).await {
             tracing::error!(error = %e, category, "failed to respond to slash command");
+        }
+    }
+
+    async fn handle_usage_command(
+        &self,
+        ctx: &Context,
+        cmd: &serenity::model::application::CommandInteraction,
+    ) {
+        let thread_key = format!("discord:{}", cmd.channel_id.get());
+
+        if !self.router.pool().has_active_session(&thread_key).await {
+            let response = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("⚠️ No active session. Start a conversation first by @mentioning the bot.")
+                    .ephemeral(true),
+            );
+            if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                tracing::error!(error = %e, "failed to respond to /usage command");
+            }
+            return;
+        }
+
+        // The ACP round-trip can exceed Discord's 3-second interaction
+        // deadline — acknowledge with a deferred ephemeral response first.
+        let defer =
+            CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
+        if let Err(e) = cmd.create_response(&ctx.http, defer).await {
+            tracing::error!(error = %e, "failed to defer /usage response");
+            return;
+        }
+
+        let followup = match self.router.pool().get_usage(&thread_key).await {
+            Ok(report) => {
+                let (content, embed) = build_usage_reply(&report);
+                CreateInteractionResponseFollowup::new()
+                    .content(content)
+                    .embed(embed)
+                    .ephemeral(true)
+            }
+            Err(e) => CreateInteractionResponseFollowup::new()
+                .content(format!("⚠️ {e}"))
+                .ephemeral(true),
+        };
+        if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+            tracing::error!(error = %e, "failed to send /usage followup");
         }
     }
 
@@ -2473,6 +2523,75 @@ impl Handler {
 
 // --- Discord-specific helpers ---
 
+/// Render the body lines of a usage report (everything except the plan title
+/// and billing-cycle footer). Returns the text and whether any breakdown is
+/// over its plan limit.
+fn format_usage_body(report: &UsageReport) -> (String, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut over_limit = false;
+
+    for b in &report.breakdowns {
+        match b.limit {
+            Some(limit) => {
+                let pct = b.percentage.unwrap_or_else(|| {
+                    if limit > 0.0 {
+                        (b.used / limit * 100.0).round() as u64
+                    } else {
+                        0
+                    }
+                });
+                if pct > 100 {
+                    over_limit = true;
+                }
+                // 10-slot progress bar, clamped at 100%.
+                let filled = (pct.min(100) as usize) / 10;
+                let bar: String = "█".repeat(filled) + &"░".repeat(10 - filled);
+                lines.push(format!(
+                    "{}: {:.2} / {:.0} `{}` {}%{}",
+                    b.display_name,
+                    b.used,
+                    limit,
+                    bar,
+                    pct,
+                    if pct > 100 { " ⚠️" } else { "" }
+                ));
+            }
+            // No per-user cap (e.g. pooled enterprise credits).
+            None => lines.push(format!("{}: {:.2} used", b.display_name, b.used)),
+        }
+        if let Some(charges) = b.overage_charges {
+            if charges > 0.0 {
+                lines.push(format!(
+                    "Overage charges: {:.2} {}",
+                    charges,
+                    b.currency.as_deref().unwrap_or("USD")
+                ));
+            }
+        }
+    }
+
+    (lines.join("\n"), over_limit)
+}
+
+/// Build the /usage reply as full-size message content plus a minimal
+/// color-strip embed. Discord renders embed descriptions at a smaller font
+/// than message content, so the report body lives in `content` (normal font)
+/// while the embed carries only the at-a-glance color signal (green within
+/// the plan limit, red when any breakdown is over) and the billing-cycle
+/// footer.
+fn build_usage_reply(report: &UsageReport) -> (String, CreateEmbed) {
+    let (body, over_limit) = format_usage_body(report);
+    let content = format!("📊 **Usage — {}**\n{}", report.plan_name, body);
+    let mut embed =
+        CreateEmbed::new().colour(if over_limit { 0xE74C3C } else { 0x2ECC71 });
+    if let Some(reset) = &report.billing_cycle_reset {
+        embed = embed.footer(CreateEmbedFooter::new(format!(
+            "Billing cycle resets {reset}"
+        )));
+    }
+    (content, embed)
+}
+
 fn discord_msg_ref(msg: &Message) -> MessageRef {
     MessageRef {
         channel: ChannelRef {
@@ -3127,6 +3246,99 @@ fn truncate_to_utf16_budget(body: &str, prefix: &str, suffix: &str, limit: usize
 mod tests {
     use super::*;
     use crate::bot_turns::{TurnResult, HARD_BOT_TURN_LIMIT, BOT_TURN_LIMIT_WARNING_PREFIX};
+
+    // --- format_usage_report tests (/usage slash command) ---
+
+    fn usage_breakdown() -> crate::acp::protocol::UsageBreakdown {
+        crate::acp::protocol::UsageBreakdown {
+            display_name: "Credits".into(),
+            used: 12781.64,
+            limit: Some(10000.0),
+            percentage: Some(127),
+            overage_charges: Some(111.27),
+            currency: Some("USD".into()),
+        }
+    }
+
+    #[test]
+    fn format_usage_over_limit() {
+        let report = UsageReport {
+            plan_name: "KIRO POWER".into(),
+            billing_cycle_reset: Some("2026-08-01".into()),
+            breakdowns: vec![usage_breakdown()],
+        };
+        let (body, over_limit) = format_usage_body(&report);
+        assert!(over_limit);
+        assert!(body.contains("12781.64 / 10000"));
+        assert!(body.contains("127%"));
+        assert!(body.contains("⚠️"));
+        assert!(body.contains("Overage charges: 111.27 USD"));
+    }
+
+    /// The report body must ride in the message content (normal font size),
+    /// not the embed description (rendered smaller by Discord clients). The
+    /// embed only carries the color strip + billing-cycle footer.
+    #[test]
+    fn usage_reply_body_in_content_not_embed() {
+        let report = UsageReport {
+            plan_name: "KIRO POWER".into(),
+            billing_cycle_reset: Some("2026-08-01".into()),
+            breakdowns: vec![usage_breakdown()],
+        };
+        let (content, embed) = build_usage_reply(&report);
+        assert!(content.starts_with("📊 **Usage — KIRO POWER**"));
+        assert!(content.contains("12781.64 / 10000"));
+        assert!(content.contains("Overage charges: 111.27 USD"));
+        let json = serde_json::to_value(&embed).expect("embed serializes");
+        assert!(json.get("description").is_none(), "body must not be in embed");
+        assert!(json.get("title").is_none(), "title must not be in embed");
+        assert_eq!(json["color"], 0xE74C3C, "over limit → red strip");
+        assert_eq!(json["footer"]["text"], "Billing cycle resets 2026-08-01");
+    }
+
+    #[test]
+    fn format_usage_no_limit_shows_consumption_only() {
+        let report = UsageReport {
+            plan_name: "ENTERPRISE".into(),
+            billing_cycle_reset: None,
+            breakdowns: vec![crate::acp::protocol::UsageBreakdown {
+                display_name: "Credits".into(),
+                used: 320.0,
+                limit: None,
+                percentage: None,
+                overage_charges: None,
+                currency: None,
+            }],
+        };
+        let (body, over_limit) = format_usage_body(&report);
+        assert!(!over_limit);
+        assert!(body.contains("Credits: 320.00 used"));
+        assert!(!body.contains('/'));
+        assert!(!body.contains("Overage"));
+    }
+
+    #[test]
+    fn format_usage_under_limit_no_warning() {
+        let report = UsageReport {
+            plan_name: "FREE".into(),
+            billing_cycle_reset: None,
+            breakdowns: vec![crate::acp::protocol::UsageBreakdown {
+                display_name: "Credits".into(),
+                used: 50.0,
+                limit: Some(100.0),
+                percentage: Some(50),
+                overage_charges: Some(0.0),
+                currency: Some("USD".into()),
+            }],
+        };
+        let (body, over_limit) = format_usage_body(&report);
+        assert!(!over_limit);
+        assert!(body.contains("50%"));
+        assert!(!body.contains("⚠️"));
+        assert!(!body.contains("Overage"));
+        // 50% → 5 of 10 bar slots filled.
+        assert!(body.contains("█████░░░░░"));
+    }
 
     // --- truncate_to_utf16_budget tests (#1185 /auth output relay) ---
 
